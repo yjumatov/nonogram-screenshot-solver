@@ -18,8 +18,9 @@ engine.
 ## How it works
 
 1. **Upload** a screenshot ([`ui/app_window.py`](ui/app_window.py)).
-2. **Detect the grid** — find the puzzle's cell grid and straighten out any perspective skew
-   ([`vision/grid_detector.py`](vision/grid_detector.py)).
+2. **Detect the grid** — straighten out any perspective skew, then find the board's size and
+   cell geometry from its row/column clue badges (robust to unsolved cells rendering a
+   decorative texture instead of plain white) ([`vision/grid_detector.py`](vision/grid_detector.py)).
 3. **Read the clues** — OCR the row/column clue numbers, correcting common misreads
    (`I`/`l` → `1`, `S` → `5`, `O` → `0`) ([`vision/ocr.py`](vision/ocr.py)).
 4. **Read the board** — classify each cell as filled (green), crossed out (red), or unknown,
@@ -73,7 +74,10 @@ python -m unittest discover tests
 
 ## Calibration note
 
-`vision/grid_detector.py` and `vision/cell_detector.py` use starting-point thresholds
-(HSV color ranges, line-detection sensitivity) that haven't been calibrated against a real
-screenshot of the target game yet. If detection misses the grid or misclassifies cells,
-tune the constants near the top of those two files against your own screenshots.
+`vision/grid_detector.py`, `vision/cell_detector.py`, and `vision/ocr.py` have been verified
+end-to-end against a real screenshot from the target game (15x15 board, clue OCR, cell
+classification, solve, and render all correct). If a screenshot from a different puzzle size
+or a visual theme variant doesn't detect cleanly, the constants near the top of those three
+files are the place to retune — in particular `_NAVY_MIN_VALUE`/`_NAVY_MAX_VALUE` in
+`grid_detector.py` (clue badge color) and the HSV ranges in `cell_detector.py` (fill/cross
+color).

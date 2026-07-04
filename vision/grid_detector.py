@@ -1,18 +1,22 @@
 """Locate the puzzle grid within a screenshot and produce a straightened image
-plus the pixel geometry of its cells and clue regions.
+plus the pixel geometry of its cells and clue badges.
 
 Tuned for screenshots from a single mobile nonogram game where the board
-renders as a large, roughly axis-aligned grid with flat-black gridlines
-(thin per-cell, thicker every 5 cells), dark navy pill-shaped clue badges to
-the left of rows and above columns, and — importantly — cells that haven't
-been solved yet can be covered in a decorative texture (a preview of the
-hidden picture) rather than plain white. Grid-line detection therefore looks
-specifically for near-black, low-saturation pixels rather than generic
-"ink", so it isn't fooled by that texture or by the (colored, not black)
-clue badges. Because these are digital screenshots rather than photos,
-"perspective correction" here is mostly a straightening/crop step, but it
-still routes through a homography so it degrades gracefully for screenshots
-with minor skew (e.g. a photo of a screen instead of a native screenshot).
+renders as a large, roughly axis-aligned grid, with a dark-navy pill-shaped
+clue badge to the left of every row and above every column. Because these
+are digital screenshots rather than photos, "perspective correction" here is
+mostly a straightening/crop step, but it still routes through a homography so
+it degrades gracefully for screenshots with minor skew (e.g. a photo of a
+screen instead of a native screenshot).
+
+Board size and cell geometry are derived from the clue badges rather than
+from counting interior gridlines. That's deliberate: cells that haven't been
+solved yet can be covered in a decorative texture (a preview of the hidden
+picture), and this game only draws the thick every-5-cells separator lines
+over that texture, not the thin per-cell ones — so counting interior lines
+undercounts the board whenever a puzzle has unsolved cells in the middle of
+it. A clue badge, in contrast, is always fully rendered for every row and
+column regardless of solved state, so counting *those* is robust.
 """
 
 from dataclasses import dataclass
@@ -28,20 +32,21 @@ class GridGeometry:
     straightened grid image returned by `load_and_straighten`.
     """
 
-    board_left: int
-    board_top: int
-    cell_size: float
+    board_left: float
+    board_top: float
+    cell_width: float
+    cell_height: float
     num_rows: int
     num_cols: int
-    row_clue_region: Tuple[int, int, int, int]  # (x0, y0, x1, y1), left of the board
-    col_clue_region: Tuple[int, int, int, int]  # (x0, y0, x1, y1), above the board
+    row_clue_boxes: List[Tuple[int, int, int, int]]  # one per row, (x0, y0, x1, y1)
+    col_clue_boxes: List[Tuple[int, int, int, int]]  # one per column, (x0, y0, x1, y1)
 
     def cell_bbox(self, row: int, col: int) -> Tuple[int, int, int, int]:
         """Pixel bounding box (x0, y0, x1, y1) of one board cell."""
-        x0 = self.board_left + round(col * self.cell_size)
-        x1 = self.board_left + round((col + 1) * self.cell_size)
-        y0 = self.board_top + round(row * self.cell_size)
-        y1 = self.board_top + round((row + 1) * self.cell_size)
+        x0 = round(self.board_left + col * self.cell_width)
+        x1 = round(self.board_left + (col + 1) * self.cell_width)
+        y0 = round(self.board_top + row * self.cell_height)
+        y1 = round(self.board_top + (row + 1) * self.cell_height)
         return x0, y0, x1, y1
 
 
@@ -96,76 +101,84 @@ def _order_corners(points: np.ndarray) -> np.ndarray:
     return np.array([top_left, top_right, bottom_right, bottom_left], dtype="float32")
 
 
-_GRID_LINE_MAX_VALUE = 80  # a channel must be at most this dark to count as "black line"
-_GRID_LINE_MAX_SATURATION = 30  # and channels must be within this range of each other (gray/black, not colored)
+# Clue badges are a dark navy blue: darker than the white/colored cells and
+# the orange page background, but distinctly lighter than the grid's flat
+# black lines (which is what keeps the two from bleeding into one blob).
+_NAVY_MIN_VALUE = 25
+_NAVY_MAX_VALUE = 150
+
+# A badge must be at least this big (relative to image area) to count as a
+# real clue badge rather than compression/anti-aliasing noise.
+_MIN_BADGE_AREA_FRACTION = 0.001
+
+# Badges are identified by which edge of the image they hug: row badges sit
+# flush against the left edge, column badges flush against the top edge.
+_ROW_BADGE_MAX_LEFT_OFFSET_FRACTION = 0.02
+_COL_BADGE_MAX_TOP_OFFSET_FRACTION = 0.05
 
 
-def _black_line_mask(image: np.ndarray) -> np.ndarray:
-    """Mask of pixels that are true black/near-black grid lines.
+def _navy_mask(image: np.ndarray) -> np.ndarray:
+    channel_max = image.max(axis=2)
+    mask = ((channel_max > _NAVY_MIN_VALUE) & (channel_max < _NAVY_MAX_VALUE)).astype(np.uint8) * 255
+    # An opening (erode then dilate) clears out thin noise and breaks any
+    # accidental single-pixel bridges between a badge and something else.
+    kernel = np.ones((3, 3), np.uint8)
+    return cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
 
-    This game draws grid lines in flat black, but board cells can otherwise
-    contain almost anything (a decorative texture behind not-yet-solved
-    cells, dark navy clue badges, colored fills). A generic adaptive
-    threshold picks up all of that as "ink" and drowns out the actual grid
-    lines, so instead we look specifically for near-black, low-saturation
-    pixels: dark AND roughly equal across B/G/R channels.
+
+def _find_clue_badges(image: np.ndarray):
+    """Find every row-clue and column-clue badge via connected components on
+    a navy-color mask, classifying each blob by shape and position. Returns
+    (row_boxes, col_boxes) sorted in reading order, each box (x0, y0, x1, y1).
     """
-    channel_max = image.max(axis=2).astype(np.int16)
-    channel_min = image.min(axis=2).astype(np.int16)
-    is_dark = channel_max < _GRID_LINE_MAX_VALUE
-    is_grayscale = (channel_max - channel_min) < _GRID_LINE_MAX_SATURATION
-    return (is_dark & is_grayscale).astype(np.uint8) * 255
+    height, width = image.shape[:2]
+    mask = _navy_mask(image)
+    num_labels, _, stats, centroids = cv2.connectedComponentsWithStats(mask, connectivity=8)
+
+    min_area = _MIN_BADGE_AREA_FRACTION * width * height
+    row_badges, col_badges = [], []
+    for i in range(1, num_labels):
+        x, y, w, h, area = stats[i]
+        if area < min_area:
+            continue
+        cx, cy = centroids[i]
+        # Row badges are wide-and-short and hug the left edge; column badges
+        # are tall-and-narrow and hug the top edge.
+        if x < _ROW_BADGE_MAX_LEFT_OFFSET_FRACTION * width and w > h:
+            row_badges.append((cy, x, y, x + w, y + h))
+        elif y < _COL_BADGE_MAX_TOP_OFFSET_FRACTION * height and h > w:
+            col_badges.append((cx, x, y, x + w, y + h))
+
+    row_badges.sort(key=lambda b: b[0])
+    col_badges.sort(key=lambda b: b[0])
+    row_boxes = [box for _, *box in row_badges]
+    col_boxes = [box for _, *box in col_badges]
+    return row_boxes, col_boxes
 
 
 def detect_grid(image: np.ndarray) -> GridGeometry:
-    """Find the board's cell grid lines and infer board size plus the
-    clue-text regions to its left and above it.
-    """
-    binary = _black_line_mask(image)
-
-    row_lines = _find_grid_lines(binary.sum(axis=1))
-    col_lines = _find_grid_lines(binary.sum(axis=0))
-    if len(row_lines) < 2 or len(col_lines) < 2:
+    """Find the board's size and cell geometry from its row/column clue badges."""
+    row_boxes, col_boxes = _find_clue_badges(image)
+    if len(row_boxes) < 2 or len(col_boxes) < 2:
         raise ValueError("Could not detect a puzzle grid in this image.")
 
-    board_top, board_bottom = row_lines[0], row_lines[-1]
-    board_left, board_right = col_lines[0], col_lines[-1]
+    row_centers = [(y0 + y1) / 2 for _, y0, _, y1 in row_boxes]
+    col_centers = [(x0 + x1) / 2 for x0, _, x1, _ in col_boxes]
+    cell_height = float(np.median(np.diff(row_centers)))
+    cell_width = float(np.median(np.diff(col_centers)))
 
-    num_rows = len(row_lines) - 1
-    num_cols = len(col_lines) - 1
-    cell_size = (
-        (board_right - board_left) / num_cols + (board_bottom - board_top) / num_rows
-    ) / 2
+    # Badge centers line up with cell centers, so the board's top-left
+    # corner is half a cell above/left of the first row/column's center.
+    board_top = row_centers[0] - cell_height / 2
+    board_left = col_centers[0] - cell_width / 2
 
     return GridGeometry(
         board_left=board_left,
         board_top=board_top,
-        cell_size=cell_size,
-        num_rows=num_rows,
-        num_cols=num_cols,
-        row_clue_region=(0, board_top, board_left, board_bottom),
-        col_clue_region=(board_left, 0, board_right, board_top),
+        cell_width=cell_width,
+        cell_height=cell_height,
+        num_rows=len(row_boxes),
+        num_cols=len(col_boxes),
+        row_clue_boxes=row_boxes,
+        col_clue_boxes=col_boxes,
     )
-
-
-def _find_grid_lines(profile: np.ndarray, min_gap_fraction: float = 0.02) -> List[int]:
-    """Collapse a row/column ink-density profile into grid-line pixel positions,
-    merging peaks closer together than a minimum expected cell size.
-    """
-    if profile.max() == 0:
-        return []
-
-    # Thin (per-cell) and thick (every-5-cells) grid lines both register far
-    # above the near-zero baseline, so a fairly low relative threshold
-    # reliably catches both without also catching background noise.
-    threshold = profile.max() * 0.3
-    candidates = np.where(profile > threshold)[0]
-    if len(candidates) == 0:
-        return []
-
-    min_gap = max(int(len(profile) * min_gap_fraction), 3)
-    lines = [int(candidates[0])]
-    for position in candidates[1:]:
-        if position - lines[-1] > min_gap:
-            lines.append(int(position))
-    return lines

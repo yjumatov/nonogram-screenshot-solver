@@ -18,7 +18,7 @@ is filtered out accordingly.
 """
 
 import re
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 import cv2
 import numpy as np
@@ -29,6 +29,10 @@ _OCR_CORRECTIONS = {
     "S": "5", "s": "5",
     "O": "0", "o": "0",
     "B": "8",
+    # This game's "1" glyph has a top serif/flag that Tesseract's
+    # digit-only mode can't place at all (empty result) but its general
+    # language model reads as one of these letters instead.
+    "T": "1", "n": "1",
 }
 
 _CHAR_WHITELIST = "0123456789IlSOoBi|"
@@ -37,6 +41,10 @@ _CHAR_WHITELIST = "0123456789IlSOoBi|"
 # ("single character") looks like the more obviously "correct" mode but
 # empirically dropped some digits (e.g. "5") that psm 13 reads fine.
 _DIGIT_CONFIG = f"--psm 13 -c tessedit_char_whitelist={_CHAR_WHITELIST}"
+# Fallback when the whitelisted pass reads nothing at all: some glyphs in
+# this font (a flagged "1") aren't recognized as any digit even loosely, so
+# retry with no character restriction and lean on _OCR_CORRECTIONS instead.
+_FALLBACK_DIGIT_CONFIG = "--psm 13"
 
 _MIN_DIGIT_AREA = 15  # pixels; discards antialiasing specks
 _DIGIT_CROP_PADDING = 6
@@ -50,8 +58,9 @@ def _correct_ocr_text(text: str) -> str:
 
 def _find_digit_boxes(thresholded: np.ndarray, orientation: str) -> List[Tuple[int, int, int, int]]:
     """Locate each digit glyph in a black-text-on-white badge image, sorted
-    in reading order, discarding the badge's rounded-cap corner artifact.
+    in reading order, discarding artifacts from the badge crop's own edges.
     """
+    height, width = thresholded.shape[:2]
     text_mask = 255 - thresholded
     num_labels, _, stats, _ = cv2.connectedComponentsWithStats(text_mask, connectivity=8)
 
@@ -67,6 +76,17 @@ def _find_digit_boxes(thresholded: np.ndarray, orientation: str) -> List[Tuple[i
         if orientation == "row" and x == 0:
             continue
         if orientation == "column" and y == 0:
+            continue
+        # The badge's opposite (flat, grid-facing) edge can likewise
+        # produce a hairline artifact if the crop overshoots the badge by a
+        # pixel or two, picking up a sliver of the (bright) board behind it.
+        # A real glyph is always inset from every edge, so a component
+        # flush against the crop boundary and needle-thin in one dimension
+        # is never real text.
+        touches_far_edge = (orientation == "row" and x + w >= width) or (
+            orientation == "column" and y + h >= height
+        )
+        if touches_far_edge and min(w, h) <= 2:
             continue
         boxes.append((x, y, x + w, y + h))
 
@@ -109,10 +129,22 @@ def read_clue_numbers(clue_image: np.ndarray, orientation: str = "row") -> List[
             cv2.BORDER_CONSTANT, value=255,
         )
 
-        raw_text = pytesseract.image_to_string(digit_crop, config=_DIGIT_CONFIG)
-        corrected = _correct_ocr_text(raw_text)
-        match = re.search(r"\d", corrected)
-        if match:
-            digits.append(int(match.group()))
+        digit = _ocr_single_digit(digit_crop)
+        if digit is not None:
+            digits.append(digit)
 
     return digits
+
+
+def _ocr_single_digit(digit_crop: np.ndarray) -> Optional[int]:
+    raw_text = pytesseract.image_to_string(digit_crop, config=_DIGIT_CONFIG)
+    match = re.search(r"\d", _correct_ocr_text(raw_text))
+    if match:
+        return int(match.group())
+
+    fallback_text = pytesseract.image_to_string(digit_crop, config=_FALLBACK_DIGIT_CONFIG)
+    match = re.search(r"\d", _correct_ocr_text(fallback_text))
+    if match:
+        return int(match.group())
+
+    return None

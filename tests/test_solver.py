@@ -44,6 +44,17 @@ class TestSolver(unittest.TestCase):
         ]
         self.assertEqual(result, expected)
 
+    def test_raises_clear_error_when_row_and_column_totals_disagree(self):
+        # Every valid nonogram has row-clue-total == column-clue-total (both
+        # count the same filled cells). A mismatch can only come from a bad
+        # read (e.g. a screenshot taken before all clues finished
+        # rendering), so this should fail fast with a specific message
+        # rather than a generic/misleading "contradictory" one.
+        row_clues = [[3], [3]]  # totals 6
+        column_clues = [[1], [1]]  # totals 2
+        with self.assertRaisesRegex(ValueError, "add up to"):
+            solve(row_clues, column_clues)
+
 
 if __name__ == "__main__":
     unittest.main()

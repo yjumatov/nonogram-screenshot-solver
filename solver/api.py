@@ -40,6 +40,21 @@ def solve(
     Returns a 2D list (height x width) of CellState, fully solved unless the
     given clues/board are contradictory.
     """
+    row_total = sum(sum(clue) for clue in row_clues)
+    col_total = sum(sum(clue) for clue in column_clues)
+    if row_total != col_total:
+        # Every valid nonogram satisfies this identity (both sides count the
+        # same filled cells, just grouped by row vs by column), so a mismatch
+        # means the read clues themselves are inconsistent — most likely a
+        # screenshot taken mid-load/mid-animation before all clue badges had
+        # rendered, rather than a misread digit (which this can't localize).
+        raise ValueError(
+            f"The row clues add up to {row_total} filled cells but the column clues add up to "
+            f"{col_total} — these can't both be right for the same board. This usually means the "
+            "screenshot was captured before the puzzle finished loading/rendering; try again with "
+            "a fresh screenshot of the fully-loaded puzzle."
+        )
+
     initial_board = None
     if current_board is not None:
         initial_board = [

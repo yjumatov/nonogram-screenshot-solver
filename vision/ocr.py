@@ -137,6 +137,7 @@ def read_clue_numbers(clue_image: np.ndarray, orientation: str = "row") -> List[
 
 
 def _ocr_single_digit(digit_crop: np.ndarray) -> Optional[int]:
+    """OCR one isolated digit glyph, or return None if neither pass reads a digit."""
     raw_text = pytesseract.image_to_string(digit_crop, config=_DIGIT_CONFIG)
     match = re.search(r"\d", _correct_ocr_text(raw_text))
     if match:

@@ -18,6 +18,7 @@ Board = List[List[str]]
 
 
 def _find_unknown_cell(board: Board):
+    """Return the (row, col) of the first still-unknown cell, or None if fully solved."""
     for row_index, row in enumerate(board):
         for col_index, status in enumerate(row):
             if status == " ":
@@ -26,6 +27,7 @@ def _find_unknown_cell(board: Board):
 
 
 def _with_guess(board: Board, row: int, col: int, status: str) -> Board:
+    """Return a copy of board with one cell set to status, for a backtracking guess."""
     guessed = [list(existing_row) for existing_row in board]
     guessed[row][col] = status
     return guessed

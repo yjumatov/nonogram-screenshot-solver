@@ -118,6 +118,7 @@ _COL_BADGE_MAX_TOP_OFFSET_FRACTION = 0.05
 
 
 def _navy_mask(image: np.ndarray) -> np.ndarray:
+    """Binary mask of pixels in the clue badges' navy color range."""
     channel_max = image.max(axis=2)
     mask = ((channel_max > _NAVY_MIN_VALUE) & (channel_max < _NAVY_MAX_VALUE)).astype(np.uint8) * 255
     # An opening (erode then dilate) clears out thin noise and breaks any

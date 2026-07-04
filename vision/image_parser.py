@@ -33,12 +33,14 @@ def parse_puzzle(image_path: str) -> Puzzle:
 
 
 def _read_clue(image, box, orientation: str):
+    """OCR one clue badge crop; an unreadable badge defaults to [0] (empty line)."""
     x0, y0, x1, y1 = box
     strip = image[y0:y1, x0:x1]
     return read_clue_numbers(strip, orientation=orientation) or [0]
 
 
 def _read_board(image, geometry: GridGeometry):
+    """Classify every board cell into a 2D grid of CellState."""
     board = []
     for row in range(geometry.num_rows):
         board_row = []
@@ -86,6 +88,7 @@ def render_solution(image_path: str, puzzle: Puzzle, solved_board) -> Image.Imag
 
 
 def _draw_cross(draw: ImageDraw.ImageDraw, box):
+    """Draw a semi-transparent X across the given (x0, y0, x1, y1) box."""
     x0, y0, x1, y1 = box
     width = max(int((x1 - x0) * _CROSS_STROKE_WIDTH_FRACTION), 2)
     draw.line([(x0, y0), (x1, y1)], fill=_CROSS_OVERLAY_RGBA, width=width)

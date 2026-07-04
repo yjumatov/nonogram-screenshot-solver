@@ -1,5 +1,26 @@
-notes.txt
-data/
+# Byte-compiled / cache
 __pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual environments
 .venv/
-*.pyc
+venv/
+env/
+
+# Packaging
+*.egg-info/
+build/
+dist/
+
+# Editors / OS
+.vscode/*
+!.vscode/launch.json
+!.vscode/settings.json
+.idea/
+.DS_Store
+
+# Local scratch output (saved solve results, etc.)
+*.local.png

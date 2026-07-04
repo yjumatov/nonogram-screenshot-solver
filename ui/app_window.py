@@ -10,8 +10,7 @@ from typing import Optional
 from PIL import Image, ImageTk
 
 from solver.api import solve
-from vision.image_parser import parse_puzzle
-from vision.image_parser import render_solution
+from vision.image_parser import parse_puzzle, render_solution
 
 PREVIEW_MAX_SIZE = (480, 480)
 
@@ -40,6 +39,7 @@ class NonogramApp(tk.Tk):
         self._build_widgets()
 
     def _build_widgets(self):
+        """Lay out the controls row, the preview/result image slots, and the status bar."""
         controls = tk.Frame(self, bg=_BG)
         controls.pack(padx=10, pady=10)
 
@@ -86,9 +86,11 @@ class NonogramApp(tk.Tk):
         return label
 
     def _set_status(self, text: str):
+        """Update the status bar text at the bottom of the window."""
         self.status_label.config(text=text)
 
     def _show_image(self, label: tk.Label, image: Image.Image):
+        """Render image into label, downscaled to fit the preview box."""
         preview = image.copy()
         preview.thumbnail(PREVIEW_MAX_SIZE)
         photo = ImageTk.PhotoImage(preview)
@@ -96,6 +98,7 @@ class NonogramApp(tk.Tk):
         label.image = photo  # keep a reference so it isn't garbage collected
 
     def _on_upload(self):
+        """Handle the Upload Image button: pick a file and show it in the preview slot."""
         path = filedialog.askopenfilename(
             title="Select a nonogram screenshot",
             filetypes=[("Images", "*.png *.jpg *.jpeg *.bmp"), ("All files", "*.*")],
@@ -120,6 +123,7 @@ class NonogramApp(tk.Tk):
         self._set_status(f"Loaded {path}. Click Solve to continue.")
 
     def _on_solve(self):
+        """Handle the Solve button: run the vision pipeline and solver, then show the result."""
         if not self._source_image_path:
             return
 
@@ -139,6 +143,7 @@ class NonogramApp(tk.Tk):
         self._set_status("Solved. You can save the result image.")
 
     def _on_save(self):
+        """Handle the Save Result button: write the solved image to a file the user picks."""
         if self._result_image is None:
             return
 
@@ -155,6 +160,7 @@ class NonogramApp(tk.Tk):
 
 
 def main():
+    """Entry point: create and run the application window."""
     app = NonogramApp()
     app.mainloop()
 

@@ -92,6 +92,7 @@ class Line(Sequence):
 
 
 def fill_xs(line):
+    """Mark every tile in a line as crossed out (used for a clue of [0])."""
     for tile in line:
         if tile == "O":
             raise ContradictionError(f"{line} is clued empty but has a filled tile")
@@ -100,11 +101,13 @@ def fill_xs(line):
 
 
 def get_tile_owner(line, tile_index):
+    """Return which block (by index) owns this tile along this line's axis, or None."""
     tile = line[tile_index]
     return getattr(tile, line.get_owner_attr())
 
 
 def set_tile_owner(line, tile_index, block_index):
+    """Record that this tile belongs to the given block, along this line's axis."""
     tile = line[tile_index]
     setattr(tile, line.get_owner_attr(), block_index)
 
@@ -232,6 +235,7 @@ def fill_no_domains_with_xs(line):
 
 
 def can_place_block_in_window(line, window_range, block):
+    """Whether the given block could occupy this tile-index window without conflict."""
     w_start, w_end = window_range
     window = line[w_start:w_end]
     for window_index, tile in enumerate(window):
@@ -272,6 +276,7 @@ def constrain_domains_within_xs(line):
 
 
 def constrain_domains_via_neighbors(line):
+    """Narrow each block's domain based on where its neighboring blocks must sit."""
     num_blocks = len(line.blocks)
     if num_blocks == 1:
         return
@@ -305,6 +310,7 @@ def constrain_domains_via_neighbors(line):
 
 
 def puzzle_to_2d_arr(puzzle_rows):
+    """Convert a list of Line rows into a plain 2D list of status characters."""
     return [[str(tile) for tile in row] for row in puzzle_rows]
 
 
@@ -320,7 +326,7 @@ def solve_puzzle(row_clues, col_clues, initial_board: Optional[list] = None):
     ambiguous when the solver can't fully determine them).
     """
     width, height = len(col_clues), len(row_clues)
-    rows, cols, lines = set_up_tile_refs(height, width, row_clues, col_clues, initial_board)
+    rows, _cols, lines = set_up_tile_refs(height, width, row_clues, col_clues, initial_board)
 
     # lines is a list containing all the rows followed by all the columns.
     for line in lines:

@@ -1,6 +1,12 @@
 MIT License
 
 Copyright (c) 2023 Buck Bukaty
+Copyright (c) 2026 The Nonogram Screenshot Solver Contributors
+
+This project's solving engine (solver/engine.py) is derived from
+https://github.com/bbukaty/nonograms, used under the MIT License above. The
+vision pipeline, backtracking layer, and desktop UI are original work added
+under the same license.
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal

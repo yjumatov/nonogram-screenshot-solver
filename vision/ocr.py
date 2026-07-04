@@ -1,18 +1,24 @@
-"""Read clue numbers out of a cropped clue-strip image, e.g. "344" -> [3, 4, 4].
+"""Read clue numbers out of a cropped clue-badge image, e.g. "344" -> [3, 4, 4].
 
 This game renders row clues as a horizontal run of digits with no separators
 inside a pill to the left of the row (e.g. "344"), and column clues as a
 vertical stack of single digits, one per line, inside a pill above the
-column (e.g. "1215" read top-to-bottom as four separate lines). Either way,
-the underlying clue values are single digits (0-9), so a bare run with no
-separators is split one character at a time.
+column (e.g. "1215" read top-to-bottom as four separate digits). Either way,
+every clue value is a single digit (0-9).
 
-Clue text is white on a dark badge, which is the reverse of the usual
-"dark text on light background" OCR assumption.
+Rather than asking Tesseract to segment and read the whole badge in one
+pass — which proved unreliable here (it would occasionally drop a digit,
+misread one, or fold the badge's rounded-cap corner into a bogus extra
+character) — each digit glyph is located ourselves via connected components
+and OCR'd individually with Tesseract in single-character mode. This also
+naturally discards the badge's rounded cap: its corner (left edge for row
+badges, top edge for column badges) is page background peeking around the
+curve, which shows up as its own connected component touching that edge and
+is filtered out accordingly.
 """
 
 import re
-from typing import List
+from typing import List, Tuple
 
 import cv2
 import numpy as np
@@ -26,21 +32,15 @@ _OCR_CORRECTIONS = {
 }
 
 _CHAR_WHITELIST = "0123456789IlSOoBi|"
-# Row clues are one horizontal line of digits; column clues are several
-# digits stacked as separate lines. Tesseract needs to be told which shape
-# to expect.
-_ROW_CONFIG = f"--psm 7 -c tessedit_char_whitelist={_CHAR_WHITELIST}"
-_COLUMN_CONFIG = f"--psm 6 -c tessedit_char_whitelist={_CHAR_WHITELIST}"
+# psm 13 ("raw line", bypassing Tesseract's usual segmentation heuristics)
+# proved the most reliable for a single isolated digit glyph; psm 10
+# ("single character") looks like the more obviously "correct" mode but
+# empirically dropped some digits (e.g. "5") that psm 13 reads fine.
+_DIGIT_CONFIG = f"--psm 13 -c tessedit_char_whitelist={_CHAR_WHITELIST}"
 
-# A clue crop is the full rectangular clue badge, but the badge is a rounded
-# "pill" shape: its bounding-box corners fall outside the rounded cap and are
-# page background, not badge color. Thresholding the whole rectangle can
-# register that corner-to-badge color transition as a stray dark arc, which
-# Tesseract sometimes reads as a bogus extra digit. So we first find the
-# actual white text pixels and crop tightly to them before thresholding.
-_TEXT_MIN_BRIGHTNESS = 150  # a channel must be at least this bright to be "white text"
-_TEXT_MAX_SATURATION = 40  # and channels must be close together (white, not orange bg)
-_TEXT_CROP_PADDING = 4
+_MIN_DIGIT_AREA = 15  # pixels; discards antialiasing specks
+_DIGIT_CROP_PADDING = 6
+_OCR_BORDER_PADDING = 10  # Tesseract reads isolated glyphs more reliably with a quiet margin
 
 
 def _correct_ocr_text(text: str) -> str:
@@ -48,39 +48,44 @@ def _correct_ocr_text(text: str) -> str:
     return "".join(_OCR_CORRECTIONS.get(char, char) for char in text)
 
 
-def _crop_to_text(clue_image: np.ndarray) -> np.ndarray:
-    """Crop tightly around the white clue text, discarding the badge's
-    rounded-cap corners (which are page background, not badge color)."""
-    channel_min = clue_image.min(axis=2).astype(np.int16)
-    channel_max = clue_image.max(axis=2).astype(np.int16)
-    is_text = (channel_min > _TEXT_MIN_BRIGHTNESS) & ((channel_max - channel_min) < _TEXT_MAX_SATURATION)
+def _find_digit_boxes(thresholded: np.ndarray, orientation: str) -> List[Tuple[int, int, int, int]]:
+    """Locate each digit glyph in a black-text-on-white badge image, sorted
+    in reading order, discarding the badge's rounded-cap corner artifact.
+    """
+    text_mask = 255 - thresholded
+    num_labels, _, stats, _ = cv2.connectedComponentsWithStats(text_mask, connectivity=8)
 
-    ys, xs = np.where(is_text)
-    if len(xs) == 0:
-        return clue_image
+    boxes = []
+    for i in range(1, num_labels):
+        x, y, w, h, area = stats[i]
+        if area < _MIN_DIGIT_AREA:
+            continue
+        # The rounded cap's corner (page background showing around the
+        # curve) forms its own component flush against the capped edge:
+        # left for row badges, top for column badges. Real digit glyphs sit
+        # inset from that edge, so this never discards actual text.
+        if orientation == "row" and x == 0:
+            continue
+        if orientation == "column" and y == 0:
+            continue
+        boxes.append((x, y, x + w, y + h))
 
-    height, width = clue_image.shape[:2]
-    x0 = max(int(xs.min()) - _TEXT_CROP_PADDING, 0)
-    x1 = min(int(xs.max()) + _TEXT_CROP_PADDING, width)
-    y0 = max(int(ys.min()) - _TEXT_CROP_PADDING, 0)
-    y1 = min(int(ys.max()) + _TEXT_CROP_PADDING, height)
-    return clue_image[y0:y1, x0:x1]
+    sort_key = (lambda box: box[1]) if orientation == "column" else (lambda box: box[0])
+    boxes.sort(key=sort_key)
+    return boxes
 
 
 def read_clue_numbers(clue_image: np.ndarray, orientation: str = "row") -> List[int]:
-    """OCR a single clue strip/cell and return its clue values as a list of ints.
+    """OCR a single clue badge and return its clue values as a list of ints.
 
-    orientation: "row" for a horizontal digit run (single text line), or
-    "column" for digits stacked vertically (multiple text lines).
+    orientation: "row" for a horizontal digit run, or "column" for digits
+    stacked vertically. Determines reading order and which edge of the
+    badge is the rounded cap to discard.
     """
     if clue_image.size == 0:
         return []
 
-    if clue_image.ndim == 3:
-        clue_image = _crop_to_text(clue_image)
-        gray = cv2.cvtColor(clue_image, cv2.COLOR_BGR2GRAY) if clue_image.size else clue_image
-    else:
-        gray = clue_image
+    gray = cv2.cvtColor(clue_image, cv2.COLOR_BGR2GRAY) if clue_image.ndim == 3 else clue_image
     if gray.size == 0:
         return []
 
@@ -90,14 +95,24 @@ def read_clue_numbers(clue_image: np.ndarray, orientation: str = "row") -> List[
     # Tesseract expects.
     _, thresholded = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
 
-    config = _ROW_CONFIG if orientation == "row" else _COLUMN_CONFIG
-    raw_text = pytesseract.image_to_string(thresholded, config=config)
-    corrected = _correct_ocr_text(raw_text)
-    tokens = re.findall(r"\d+", corrected)
-    if not tokens:
-        return []
+    digits = []
+    height, width = thresholded.shape[:2]
+    for x0, y0, x1, y1 in _find_digit_boxes(thresholded, orientation):
+        cx0 = max(x0 - _DIGIT_CROP_PADDING, 0)
+        cy0 = max(y0 - _DIGIT_CROP_PADDING, 0)
+        cx1 = min(x1 + _DIGIT_CROP_PADDING, width)
+        cy1 = min(y1 + _DIGIT_CROP_PADDING, height)
+        digit_crop = thresholded[cy0:cy1, cx0:cx1]
+        digit_crop = cv2.copyMakeBorder(
+            digit_crop,
+            _OCR_BORDER_PADDING, _OCR_BORDER_PADDING, _OCR_BORDER_PADDING, _OCR_BORDER_PADDING,
+            cv2.BORDER_CONSTANT, value=255,
+        )
 
-    if len(tokens) > 1:
-        return [int(token) for token in tokens]
+        raw_text = pytesseract.image_to_string(digit_crop, config=_DIGIT_CONFIG)
+        corrected = _correct_ocr_text(raw_text)
+        match = re.search(r"\d", corrected)
+        if match:
+            digits.append(int(match.group()))
 
-    return [int(digit) for digit in tokens[0]]
+    return digits

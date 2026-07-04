@@ -22,7 +22,6 @@ class NonogramApp(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("Nonogram Screenshot Solver")
-        self.resizable(False, False)
 
         self._source_image_path: Optional[str] = None
         self._result_image: Optional[Image.Image] = None
@@ -48,17 +47,31 @@ class NonogramApp(tk.Tk):
         preview_col = tk.Frame(images)
         preview_col.grid(row=0, column=0, padx=10)
         tk.Label(preview_col, text="Uploaded Screenshot").pack()
-        self.preview_label = tk.Label(preview_col, relief=tk.SUNKEN, width=40, height=20)
-        self.preview_label.pack()
+        self.preview_label = self._make_image_slot(preview_col)
 
         result_col = tk.Frame(images)
         result_col.grid(row=0, column=1, padx=10)
         tk.Label(result_col, text="Solved Result").pack()
-        self.result_label = tk.Label(result_col, relief=tk.SUNKEN, width=40, height=20)
-        self.result_label.pack()
+        self.result_label = self._make_image_slot(result_col)
 
         self.status_label = tk.Label(self, text="Upload a screenshot to begin.", anchor="w")
         self.status_label.pack(fill=tk.X, padx=10, pady=(0, 10))
+
+    def _make_image_slot(self, parent: tk.Frame) -> tk.Label:
+        """A fixed-size placeholder box that will later hold a photo.
+
+        The box's size is set on an outer Frame (always pixel units in
+        Tkinter) rather than on the Label itself, since a Label's width/height
+        options are character-cell units until an image is set and pixel
+        units after — mixing the two on the same widget is a classic way to
+        end up with an image that silently fails to render.
+        """
+        box = tk.Frame(parent, width=PREVIEW_MAX_SIZE[0], height=PREVIEW_MAX_SIZE[1], relief=tk.SUNKEN, borderwidth=1)
+        box.pack()
+        box.pack_propagate(False)
+        label = tk.Label(box)
+        label.pack(expand=True)
+        return label
 
     def _set_status(self, text: str):
         self.status_label.config(text=text)
@@ -67,7 +80,7 @@ class NonogramApp(tk.Tk):
         preview = image.copy()
         preview.thumbnail(PREVIEW_MAX_SIZE)
         photo = ImageTk.PhotoImage(preview)
-        label.configure(image=photo, width=preview.width, height=preview.height)
+        label.configure(image=photo)
         label.image = photo  # keep a reference so it isn't garbage collected
 
     def _on_upload(self):
@@ -87,7 +100,7 @@ class NonogramApp(tk.Tk):
 
         self._source_image_path = path
         self._show_image(self.preview_label, image)
-        self.result_label.configure(image="", width=40, height=20)
+        self.result_label.configure(image="")
         self.result_label.image = None
         self._result_image = None
         self.save_button.config(state=tk.DISABLED)

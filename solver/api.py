@@ -8,7 +8,7 @@ algorithm in engine.py untouched and isolated behind a stable interface.
 from typing import List, Optional
 
 from models.puzzle import CellState
-from solver import engine
+from solver.search import solve_with_backtracking
 
 # CellState <-> the single-character status codes the engine works with internally.
 _STATE_TO_CHAR = {
@@ -33,8 +33,12 @@ def solve(
                      are left for the solver to determine. Pass None to solve
                      from a completely blank board.
 
-    Returns a 2D list (height x width) of CellState. Cells the solver
-    couldn't fully determine remain CellState.UNKNOWN.
+    Line-solving alone doesn't fully determine every puzzle; where it stalls,
+    this falls back to guess-and-check (solver.search) until the board is
+    fully solved or a guess is proven wrong.
+
+    Returns a 2D list (height x width) of CellState, fully solved unless the
+    given clues/board are contradictory.
     """
     initial_board = None
     if current_board is not None:
@@ -42,5 +46,8 @@ def solve(
             [_STATE_TO_CHAR[cell] for cell in row] for row in current_board
         ]
 
-    result_chars = engine.solve_puzzle(row_clues, column_clues, initial_board)
+    result_chars = solve_with_backtracking(row_clues, column_clues, initial_board)
+    if result_chars is None:
+        raise ValueError("These clues and current board are contradictory — no valid solution exists.")
+
     return [[_CHAR_TO_STATE[char] for char in row] for row in result_chars]

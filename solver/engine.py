@@ -1,10 +1,18 @@
 """Core nonogram solving engine.
 
 This is the original line-solving constraint-propagation algorithm from the
-`bbukaty/nonograms` project, preserved as-is. The only functional addition
-is optional support for seeding tiles with a partially-known board (needed
-so the vision pipeline can hand the solver a board it read from a
-screenshot, rather than always starting from a blank grid).
+`bbukaty/nonograms` project — every deduction rule is unchanged. Two things
+were added on top, neither altering how a deduction is made:
+
+- optional support for seeding tiles with a partially-known board (needed so
+  the vision pipeline can hand the solver a board it read from a
+  screenshot, rather than always starting from a blank grid).
+- ContradictionError, raised where the original code would otherwise either
+  silently overwrite a tile with the opposite of what's already there, or
+  (in one case) let a domain search run out of bounds and report a false
+  positive. A correct, unguessed initial_board never hits these paths; they
+  only trigger when solver/search.py's backtracking guesses wrong, which is
+  exactly what it needs a signal for.
 
 Cell status characters used throughout: " " (unknown), "O" (filled),
 "X" (crossed out / empty).
@@ -14,6 +22,18 @@ from collections.abc import Sequence
 from typing import Optional
 
 DEBUG = False
+
+
+class ContradictionError(Exception):
+    """Raised when the current board is provably inconsistent with the clues.
+
+    This can only happen when solve_puzzle is seeded with a guessed cell (via
+    initial_board) that turns out to be wrong — the original deduction rules
+    themselves never guess, so a valid initial_board (or none) never
+    triggers this. It exists so a caller doing search/backtracking on top of
+    this engine (see solver/search.py) has a reliable signal to backtrack on,
+    instead of the engine silently computing a wrong board.
+    """
 
 
 class Tile:
@@ -73,6 +93,8 @@ class Line(Sequence):
 
 def fill_xs(line):
     for tile in line:
+        if tile == "O":
+            raise ContradictionError(f"{line} is clued empty but has a filled tile")
         tile.mark("X")
     line.has_changes = True
 
@@ -138,6 +160,10 @@ def fill_domain_centers(line):
             tile = line[tile_index]
             if tile == "O":
                 continue
+            if tile == "X":
+                raise ContradictionError(
+                    f"{line} tile {tile_index} must be filled by block {block_index} but is crossed out"
+                )
             tile.mark("O")
             if DEBUG:
                 print(f"FILD: setting {line} tile {tile_index} {line.get_owner_attr()} to block {block_index} [{line.blocks[block_index]}]")
@@ -164,7 +190,8 @@ def identify_o_owners(line):
             continue
 
         active_domains = get_active_domains(line, tile_index)
-        assert len(active_domains) != 0  # Os should always belong to at least one domain
+        if len(active_domains) == 0:
+            raise ContradictionError(f"{line} tile {tile_index} is filled but no block domain covers it")
         if len(active_domains) > 1:
             continue
 
@@ -223,9 +250,16 @@ def constrain_domains_within_xs(line):
         a, b = block_domain
         while not can_place_block_in_window(line, (a, a + block_len), block_index):
             a += 1
+            # Without this bound, a growing past b would eventually shrink
+            # the window slice below block_len, and can_place_block_in_window
+            # would (wrongly) report an out-of-bounds window as placeable.
+            if a > b - block_len + 1:
+                raise ContradictionError(f"{line} block {block_index} has no valid position left")
             line.has_changes = True
         while not can_place_block_in_window(line, (b - block_len + 1, b + 1), block_index):
             b -= 1
+            if b < a + block_len - 1:
+                raise ContradictionError(f"{line} block {block_index} has no valid position left")
             line.has_changes = True
         line.block_domains[block_index] = (a, b)
 

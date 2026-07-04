@@ -12,8 +12,11 @@ upload, solve, done.
 
 The solving algorithm is the original constraint-propagation ("line solving") engine from
 this project's earlier command-line solver, unchanged, in [`solver/engine.py`](solver/engine.py).
-Everything else here — the vision pipeline and the desktop UI — is new, built around that
-engine.
+Line-solving alone doesn't fully determine every puzzle, so [`solver/search.py`](solver/search.py)
+adds a guess-and-check layer on top — without changing a single deduction rule in
+`engine.py` — that guesses a cell, re-runs the unmodified engine, and keeps the guess unless
+it proves contradictory. Everything else here — the vision pipeline and the desktop UI — is
+new, built around that engine.
 
 ## How it works
 
@@ -42,7 +45,7 @@ computer-vision project in its own right.
 app/       entry point
 ui/        the (only) window: upload / preview / solve / result / save
 vision/    screenshot -> Puzzle, and solved board -> overlay image
-solver/    the original solving engine, behind a small reusable API
+solver/    the original solving engine (unchanged) plus a backtracking layer, behind a reusable API
 models/    shared data types (Puzzle, CellState)
 tests/     solver smoke tests
 ```

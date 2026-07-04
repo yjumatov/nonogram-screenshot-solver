@@ -25,25 +25,27 @@ def parse_puzzle(image_path: str) -> Puzzle:
     image = grid_detector.load_and_straighten(image_path)
     geometry = grid_detector.detect_grid(image)
 
-    row_clues = [_read_clue_strip(image, geometry, row=row) for row in range(geometry.num_rows)]
-    column_clues = [_read_clue_strip(image, geometry, col=col) for col in range(geometry.num_cols)]
+    row_clues = [_read_row_clue(image, geometry, row) for row in range(geometry.num_rows)]
+    column_clues = [_read_column_clue(image, geometry, col) for col in range(geometry.num_cols)]
     board = _read_board(image, geometry)
 
     return Puzzle(row_clues=row_clues, column_clues=column_clues, board=board)
 
 
-def _read_clue_strip(image, geometry: GridGeometry, row: int = None, col: int = None):
-    if row is not None:
-        x0, y0, x1, y1 = geometry.row_clue_region
-        y0 = y0 + round(row * geometry.cell_size)
-        y1 = y0 + round(geometry.cell_size)
-    else:
-        x0, y0, x1, y1 = geometry.col_clue_region
-        x0 = x0 + round(col * geometry.cell_size)
-        x1 = x0 + round(geometry.cell_size)
-
+def _read_row_clue(image, geometry: GridGeometry, row: int):
+    x0, y0, x1, _ = geometry.row_clue_region
+    y0 = y0 + round(row * geometry.cell_size)
+    y1 = y0 + round(geometry.cell_size)
     strip = image[y0:y1, x0:x1]
-    return read_clue_numbers(strip) or [0]
+    return read_clue_numbers(strip, orientation="row") or [0]
+
+
+def _read_column_clue(image, geometry: GridGeometry, col: int):
+    x0, y0, _, y1 = geometry.col_clue_region
+    x0 = x0 + round(col * geometry.cell_size)
+    x1 = x0 + round(geometry.cell_size)
+    strip = image[y0:y1, x0:x1]
+    return read_clue_numbers(strip, orientation="column") or [0]
 
 
 def _read_board(image, geometry: GridGeometry):

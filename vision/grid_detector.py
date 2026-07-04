@@ -2,16 +2,17 @@
 plus the pixel geometry of its cells and clue regions.
 
 Tuned for screenshots from a single mobile nonogram game where the board
-renders as a large, roughly axis-aligned grid with thin per-cell gridlines,
-row clues to the left of the board, and column clues above it. Because these
-are digital screenshots rather than photos, "perspective correction" here is
-mostly a straightening/crop step, but it still routes through a homography so
-it degrades gracefully for screenshots with minor skew (e.g. a photo of a
-screen instead of a native screenshot).
-
-NOTE: the thresholds below are reasonable starting points, not values
-calibrated against a real screenshot of the target game — they will likely
-need tuning once a sample image is available.
+renders as a large, roughly axis-aligned grid with flat-black gridlines
+(thin per-cell, thicker every 5 cells), dark navy pill-shaped clue badges to
+the left of rows and above columns, and — importantly — cells that haven't
+been solved yet can be covered in a decorative texture (a preview of the
+hidden picture) rather than plain white. Grid-line detection therefore looks
+specifically for near-black, low-saturation pixels rather than generic
+"ink", so it isn't fooled by that texture or by the (colored, not black)
+clue badges. Because these are digital screenshots rather than photos,
+"perspective correction" here is mostly a straightening/crop step, but it
+still routes through a homography so it degrades gracefully for screenshots
+with minor skew (e.g. a photo of a screen instead of a native screenshot).
 """
 
 from dataclasses import dataclass
@@ -95,14 +96,32 @@ def _order_corners(points: np.ndarray) -> np.ndarray:
     return np.array([top_left, top_right, bottom_right, bottom_left], dtype="float32")
 
 
+_GRID_LINE_MAX_VALUE = 80  # a channel must be at most this dark to count as "black line"
+_GRID_LINE_MAX_SATURATION = 30  # and channels must be within this range of each other (gray/black, not colored)
+
+
+def _black_line_mask(image: np.ndarray) -> np.ndarray:
+    """Mask of pixels that are true black/near-black grid lines.
+
+    This game draws grid lines in flat black, but board cells can otherwise
+    contain almost anything (a decorative texture behind not-yet-solved
+    cells, dark navy clue badges, colored fills). A generic adaptive
+    threshold picks up all of that as "ink" and drowns out the actual grid
+    lines, so instead we look specifically for near-black, low-saturation
+    pixels: dark AND roughly equal across B/G/R channels.
+    """
+    channel_max = image.max(axis=2).astype(np.int16)
+    channel_min = image.min(axis=2).astype(np.int16)
+    is_dark = channel_max < _GRID_LINE_MAX_VALUE
+    is_grayscale = (channel_max - channel_min) < _GRID_LINE_MAX_SATURATION
+    return (is_dark & is_grayscale).astype(np.uint8) * 255
+
+
 def detect_grid(image: np.ndarray) -> GridGeometry:
     """Find the board's cell grid lines and infer board size plus the
     clue-text regions to its left and above it.
     """
-    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-    binary = cv2.adaptiveThreshold(
-        gray, 255, cv2.ADAPTIVE_THRESH_MEAN_C, cv2.THRESH_BINARY_INV, 15, 5
-    )
+    binary = _black_line_mask(image)
 
     row_lines = _find_grid_lines(binary.sum(axis=1))
     col_lines = _find_grid_lines(binary.sum(axis=0))
@@ -136,7 +155,10 @@ def _find_grid_lines(profile: np.ndarray, min_gap_fraction: float = 0.02) -> Lis
     if profile.max() == 0:
         return []
 
-    threshold = profile.max() * 0.5
+    # Thin (per-cell) and thick (every-5-cells) grid lines both register far
+    # above the near-zero baseline, so a fairly low relative threshold
+    # reliably catches both without also catching background noise.
+    threshold = profile.max() * 0.3
     candidates = np.where(profile > threshold)[0]
     if len(candidates) == 0:
         return []

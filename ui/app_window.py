@@ -15,6 +15,16 @@ from vision.image_parser import render_solution
 
 PREVIEW_MAX_SIZE = (480, 480)
 
+# Explicit colors throughout, rather than Tk/system defaults: this app was
+# found running under a very old Tk (8.5, from the macOS Command Line Tools
+# Python), which predates real Dark Mode support — under a dark system
+# appearance its default widget colors resolved to text and borders with no
+# contrast against the window background, rendering as blank space even
+# though the widgets (and their images) were genuinely there.
+_BG = "#f0f0f0"
+_FG = "#111111"
+_IMAGE_SLOT_BG = "#ffffff"
+
 
 class NonogramApp(tk.Tk):
     """Single-window app: Upload -> Preview -> Solve -> Result -> Save."""
@@ -22,6 +32,7 @@ class NonogramApp(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("Nonogram Screenshot Solver")
+        self.configure(bg=_BG)
 
         self._source_image_path: Optional[str] = None
         self._result_image: Optional[Image.Image] = None
@@ -29,7 +40,7 @@ class NonogramApp(tk.Tk):
         self._build_widgets()
 
     def _build_widgets(self):
-        controls = tk.Frame(self)
+        controls = tk.Frame(self, bg=_BG)
         controls.pack(padx=10, pady=10)
 
         self.upload_button = tk.Button(controls, text="Upload Image", command=self._on_upload)
@@ -41,20 +52,20 @@ class NonogramApp(tk.Tk):
         self.save_button = tk.Button(controls, text="Save Result", command=self._on_save, state=tk.DISABLED)
         self.save_button.grid(row=0, column=2, padx=5)
 
-        images = tk.Frame(self)
+        images = tk.Frame(self, bg=_BG)
         images.pack(padx=10, pady=(0, 10))
 
-        preview_col = tk.Frame(images)
+        preview_col = tk.Frame(images, bg=_BG)
         preview_col.grid(row=0, column=0, padx=10)
-        tk.Label(preview_col, text="Uploaded Screenshot").pack()
+        tk.Label(preview_col, text="Uploaded Screenshot", bg=_BG, fg=_FG).pack()
         self.preview_label = self._make_image_slot(preview_col)
 
-        result_col = tk.Frame(images)
+        result_col = tk.Frame(images, bg=_BG)
         result_col.grid(row=0, column=1, padx=10)
-        tk.Label(result_col, text="Solved Result").pack()
+        tk.Label(result_col, text="Solved Result", bg=_BG, fg=_FG).pack()
         self.result_label = self._make_image_slot(result_col)
 
-        self.status_label = tk.Label(self, text="Upload a screenshot to begin.", anchor="w")
+        self.status_label = tk.Label(self, text="Upload a screenshot to begin.", anchor="w", bg=_BG, fg=_FG)
         self.status_label.pack(fill=tk.X, padx=10, pady=(0, 10))
 
     def _make_image_slot(self, parent: tk.Frame) -> tk.Label:
@@ -66,10 +77,11 @@ class NonogramApp(tk.Tk):
         units after — mixing the two on the same widget is a classic way to
         end up with an image that silently fails to render.
         """
-        box = tk.Frame(parent, width=PREVIEW_MAX_SIZE[0], height=PREVIEW_MAX_SIZE[1], relief=tk.SUNKEN, borderwidth=1)
+        box = tk.Frame(parent, width=PREVIEW_MAX_SIZE[0], height=PREVIEW_MAX_SIZE[1], bg=_IMAGE_SLOT_BG,
+                       relief=tk.SUNKEN, borderwidth=1)
         box.pack()
         box.pack_propagate(False)
-        label = tk.Label(box)
+        label = tk.Label(box, bg=_IMAGE_SLOT_BG)
         label.pack(expand=True)
         return label
 

@@ -63,7 +63,7 @@ your `PATH`; the standard python.org installer already ships a working Tk.
 ### Setup
 
 ```bash
-git clone https://github.com/<your-username>/nonogram-screenshot-solver.git
+git clone https://github.com/yjumatov/nonogram-screenshot-solver.git
 cd nonogram-screenshot-solver
 
 python3.12 -m venv .venv

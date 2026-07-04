@@ -52,14 +52,26 @@ tests/     solver smoke tests
 
 ## Setup (VS Code)
 
-Requires Python 3.9+ and [Tesseract OCR](https://github.com/tesseract-ocr/tesseract) installed
-on your system (`brew install tesseract` on macOS, `apt install tesseract-ocr` on Debian/Ubuntu).
+Requires Python 3.9+ **with a working Tk** and [Tesseract OCR](https://github.com/tesseract-ocr/tesseract)
+installed on your system.
+
+**On macOS, don't use the system/Command Line Tools Python for this.** It bundles Tk 8.5
+(from 2009), which predates Dark Mode and renders this app's window as entirely blank —
+not a bug in this app's code, a broken Tk on a modern OS. Use a Homebrew Python instead,
+which links against a modern Tk:
 
 ```bash
-python3 -m venv .venv
-source .venv/bin/activate       # in VS Code, select this interpreter (Cmd/Ctrl+Shift+P -> Python: Select Interpreter)
+brew install tesseract python-tk@3.12   # installs a modern Tcl/Tk alongside Python 3.12
+python3.12 -m venv .venv                # use the Homebrew python3.12, not /usr/bin/python3
+source .venv/bin/activate               # in VS Code, select this interpreter (Cmd/Ctrl+Shift+P -> Python: Select Interpreter)
 pip install -r requirements.txt
 ```
+
+On Linux: `apt install tesseract-ocr python3-tk`, then the usual `python3 -m venv .venv`.
+
+If the window ever renders blank again, it's almost certainly this: run
+`python3 -c "import tkinter as tk; print(tk.Tk().call('info','patchlevel'))"` — if it prints
+`8.5.x`, you're on the broken system Tk and need to switch interpreters as above.
 
 ## Running the app
 

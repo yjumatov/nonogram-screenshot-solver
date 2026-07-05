@@ -3,7 +3,7 @@
 import unittest
 
 from solver.engine import solve_puzzle
-from solver.search import solve_with_backtracking
+from solver.search import _matches_every_clue, solve_with_backtracking
 
 # Real clues from an actual game screenshot where pure line-solving stalls
 # with 92 cells still undetermined (verified separately) — a genuine case
@@ -46,6 +46,39 @@ class TestSearch(unittest.TestCase):
         # crossed out — no valid placement exists.
         result = solve_with_backtracking([[1]], [[1], [1]], [["X", "X"]])
         self.assertIsNone(result)
+
+    def test_backtracking_rejects_a_wrong_guess_that_completes_the_board(self):
+        # Real clues from an actual screenshot (one seeded cell: row 0, col 1
+        # crossed out) that used to trigger a genuine bug: a wrong
+        # backtracking guess let line-solving fill every remaining cell
+        # without ever raising ContradictionError, so the old code accepted
+        # it just because no unknown cells were left — even though it didn't
+        # actually satisfy every clue (previously wrong on rows 6/7 and
+        # columns 2/9). solve_with_backtracking must keep searching past
+        # that instead of returning the first "complete" board it finds.
+        row_clues = [[4], [4], [4], [4], [4], [4, 2], [3, 1, 1], [2, 1, 1], [2, 1], [1, 1]]
+        column_clues = [[3], [5], [3, 1], [3, 1, 1], [3, 1, 1], [5, 1], [4, 2], [3], [2], [1]]
+        initial_board = [[" "] * 10 for _ in range(10)]
+        initial_board[0][1] = "X"
+
+        board = solve_with_backtracking(row_clues, column_clues, initial_board)
+
+        self.assertIsNotNone(board)
+        for row, clue in zip(board, row_clues):
+            self.assertEqual(_runs(row), clue)
+        for col_index, clue in enumerate(column_clues):
+            column = [row[col_index] for row in board]
+            self.assertEqual(_runs(column), clue)
+
+
+class TestMatchesEveryClue(unittest.TestCase):
+    def test_true_when_board_satisfies_every_clue(self):
+        board = [["O", "X"], ["X", "O"]]
+        self.assertTrue(_matches_every_clue(board, [[1], [1]], [[1], [1]]))
+
+    def test_false_when_a_row_run_is_wrong(self):
+        board = [["O", "O"], ["X", "O"]]
+        self.assertFalse(_matches_every_clue(board, [[1], [1]], [[1], [2]]))
 
 
 def _runs(line):

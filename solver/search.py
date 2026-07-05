@@ -33,6 +33,44 @@ def _with_guess(board: Board, row: int, col: int, status: str) -> Board:
     return guessed
 
 
+def _line_runs(line: List[str]) -> List[int]:
+    """Convert a fully-filled line's statuses into its clue-style run lengths."""
+    runs = []
+    count = 0
+    for status in line:
+        if status == "O":
+            count += 1
+        elif count > 0:
+            runs.append(count)
+            count = 0
+    if count > 0:
+        runs.append(count)
+    return runs or [0]
+
+
+def _matches_every_clue(board: Board, row_clues: List[List[int]], col_clues: List[List[int]]) -> bool:
+    """Whether a fully-filled board's actual run lengths match every clue.
+
+    This is the definitive check for a guessed cell being wrong: the
+    engine's deduction rules are only guaranteed sound when every mark on
+    the board is genuinely forced, but a seeded guess isn't forced — it's
+    an assumption. The engine can reach "no cells left unknown" by
+    deducing consistently *from that assumption* without ever hitting one
+    of ContradictionError's specific trip points, producing a board that's
+    complete but doesn't actually satisfy its own clues. Wrong guesses must
+    be caught here rather than trusted just because no unknown cells
+    remain.
+    """
+    for row, clue in zip(board, row_clues):
+        if _line_runs(row) != clue:
+            return False
+    for col_index, clue in enumerate(col_clues):
+        column = [row[col_index] for row in board]
+        if _line_runs(column) != clue:
+            return False
+    return True
+
+
 def solve_with_backtracking(
     row_clues: List[List[int]],
     col_clues: List[List[int]],
@@ -53,7 +91,7 @@ def solve_with_backtracking(
 
     unknown = _find_unknown_cell(board)
     if unknown is None:
-        return board
+        return board if _matches_every_clue(board, row_clues, col_clues) else None
 
     row, col = unknown
     for guess in ("O", "X"):

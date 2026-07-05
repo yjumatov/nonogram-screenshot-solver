@@ -36,15 +36,13 @@ _OCR_CORRECTIONS = {
 }
 
 _CHAR_WHITELIST = "0123456789IlSOoBi|"
-# psm 13 ("raw line", bypassing Tesseract's usual segmentation heuristics)
-# proved the most reliable for a single isolated digit glyph; psm 10
-# ("single character") looks like the more obviously "correct" mode but
-# empirically dropped some digits (e.g. "5") that psm 13 reads fine.
-_DIGIT_CONFIG = f"--psm 13 -c tessedit_char_whitelist={_CHAR_WHITELIST}"
-# Fallback when the whitelisted pass reads nothing at all: some glyphs in
-# this font (a flagged "1") aren't recognized as any digit even loosely, so
-# retry with no character restriction and lean on _OCR_CORRECTIONS instead.
-_FALLBACK_DIGIT_CONFIG = "--psm 13"
+# No single Tesseract page-segmentation mode reads every digit glyph in this
+# font reliably — psm 13 ("raw line") is needed for some glyphs (a flagged
+# "1", a "5" that psm 10 drops entirely) but blank on others (a "0" that only
+# psm 6 reads). Rather than chase one "correct" mode, try a short list, each
+# with and without the digit whitelist, and take the first one that yields a
+# digit — cheap, since each attempt is a single isolated glyph.
+_DIGIT_PSM_MODES = (13, 6)
 
 _MIN_DIGIT_AREA = 15  # pixels; discards antialiasing specks
 _DIGIT_CROP_PADDING = 6
@@ -90,9 +88,79 @@ def _find_digit_boxes(thresholded: np.ndarray, orientation: str) -> List[Tuple[i
             continue
         boxes.append((x, y, x + w, y + h))
 
-    sort_key = (lambda box: box[1]) if orientation == "column" else (lambda box: box[0])
-    boxes.sort(key=sort_key)
-    return boxes
+    if orientation == "row":
+        boxes.sort(key=lambda box: box[0])
+        return boxes
+    return _order_column_digits(boxes)
+
+
+def _order_column_digits(boxes: List[Tuple[int, int, int, int]]) -> List[Tuple[int, int, int, int]]:
+    """Column clues are normally one digit per line, top to bottom — but two
+    digits can render side-by-side on the same line if that's more compact
+    (e.g. "10"). Group boxes whose y-ranges substantially overlap into the
+    same line, sort lines top to bottom, and sort left-to-right within a
+    line — a plain sort by y alone would order same-line digits by whichever
+    has the smaller y0, not by reading order.
+    """
+    boxes = sorted(boxes, key=lambda box: (box[1], box[0]))  # (y0, x0)
+
+    lines: List[List[Tuple[int, int, int, int]]] = []
+    for box in boxes:
+        _, y0, _, y1 = box
+        if lines:
+            _, line_y0, _, line_y1 = lines[-1][0]
+            overlap = min(y1, line_y1) - max(y0, line_y0)
+            shorter_height = min(y1 - y0, line_y1 - line_y0)
+            if overlap > 0.5 * shorter_height:
+                lines[-1].append(box)
+                continue
+        lines.append([box])
+
+    ordered = []
+    for line in lines:
+        ordered.extend(sorted(line, key=lambda box: box[0]))
+    return ordered
+
+
+def _padded_crop_bounds(
+    box: Tuple[int, int, int, int],
+    all_boxes: List[Tuple[int, int, int, int]],
+    width: int,
+    height: int,
+) -> Tuple[int, int, int, int]:
+    """Padding around a digit box, clamped so it never crosses into another
+    digit — whichever direction that neighbor happens to be in.
+
+    Digits are normally stacked vertically one per line, but two can render
+    side-by-side on the same line instead (e.g. "10"), just a couple of
+    pixels apart — closer than the padding alone would respect. Rather than
+    assume a fixed layout, this checks every other box directly: one only
+    constrains this box's left/right padding if it overlaps vertically
+    (i.e. it's a horizontal neighbor), and only constrains top/bottom if it
+    overlaps horizontally (i.e. it's a vertical neighbor).
+    """
+    x0, y0, x1, y1 = box
+    min_x0, max_x1, min_y0, max_y1 = 0, width, 0, height
+    for other in all_boxes:
+        if other is box:
+            continue
+        ox0, oy0, ox1, oy1 = other
+        if min(y1, oy1) - max(y0, oy0) > 0:  # vertical overlap -> horizontal neighbor
+            if ox1 <= x0:
+                min_x0 = max(min_x0, (ox1 + x0) // 2)
+            if ox0 >= x1:
+                max_x1 = min(max_x1, (x1 + ox0) // 2)
+        if min(x1, ox1) - max(x0, ox0) > 0:  # horizontal overlap -> vertical neighbor
+            if oy1 <= y0:
+                min_y0 = max(min_y0, (oy1 + y0) // 2)
+            if oy0 >= y1:
+                max_y1 = min(max_y1, (y1 + oy0) // 2)
+
+    cx0 = max(x0 - _DIGIT_CROP_PADDING, min_x0)
+    cy0 = max(y0 - _DIGIT_CROP_PADDING, min_y0)
+    cx1 = min(x1 + _DIGIT_CROP_PADDING, max_x1)
+    cy1 = min(y1 + _DIGIT_CROP_PADDING, max_y1)
+    return cx0, cy0, cx1, cy1
 
 
 def read_clue_numbers(clue_image: np.ndarray, orientation: str = "row") -> List[int]:
@@ -117,11 +185,9 @@ def read_clue_numbers(clue_image: np.ndarray, orientation: str = "row") -> List[
 
     digits = []
     height, width = thresholded.shape[:2]
-    for x0, y0, x1, y1 in _find_digit_boxes(thresholded, orientation):
-        cx0 = max(x0 - _DIGIT_CROP_PADDING, 0)
-        cy0 = max(y0 - _DIGIT_CROP_PADDING, 0)
-        cx1 = min(x1 + _DIGIT_CROP_PADDING, width)
-        cy1 = min(y1 + _DIGIT_CROP_PADDING, height)
+    digit_boxes = _find_digit_boxes(thresholded, orientation)
+    for box in digit_boxes:
+        cx0, cy0, cx1, cy1 = _padded_crop_bounds(box, digit_boxes, width, height)
         digit_crop = thresholded[cy0:cy1, cx0:cx1]
         digit_crop = cv2.copyMakeBorder(
             digit_crop,
@@ -133,19 +199,41 @@ def read_clue_numbers(clue_image: np.ndarray, orientation: str = "row") -> List[
         if digit is not None:
             digits.append(digit)
 
-    return digits
+    return _merge_trailing_zeros(digits)
+
+
+def _merge_trailing_zeros(digits: List[int]) -> List[int]:
+    """Fold a "0" that follows another digit into a two-digit clue (e.g. a
+    board-filling run of ten renders as adjacent "1" and "0" glyphs, same as
+    every other multi-digit clue in this game — no separator).
+
+    A block size of 0 is only ever meaningful as the *sole* clue on a line
+    (meaning the line is empty); every other clue value is >=1. So a "0"
+    glyph that isn't the only one present can't be a standalone clue — it
+    must be completing a two-digit number with the glyph before it. This
+    doesn't generalize to other multi-digit values (e.g. distinguishing "12"
+    the clue from clues "1" and "2" back to back is genuinely ambiguous
+    without more context), but a trailing zero is unambiguous.
+    """
+    merged: List[int] = []
+    for digit in digits:
+        if digit == 0 and merged:
+            merged[-1] = merged[-1] * 10
+        else:
+            merged.append(digit)
+    return merged
 
 
 def _ocr_single_digit(digit_crop: np.ndarray) -> Optional[int]:
-    """OCR one isolated digit glyph, or return None if neither pass reads a digit."""
-    raw_text = pytesseract.image_to_string(digit_crop, config=_DIGIT_CONFIG)
-    match = re.search(r"\d", _correct_ocr_text(raw_text))
-    if match:
-        return int(match.group())
-
-    fallback_text = pytesseract.image_to_string(digit_crop, config=_FALLBACK_DIGIT_CONFIG)
-    match = re.search(r"\d", _correct_ocr_text(fallback_text))
-    if match:
-        return int(match.group())
+    """OCR one isolated digit glyph, or return None if no attempt reads a digit."""
+    for psm in _DIGIT_PSM_MODES:
+        for whitelist in (_CHAR_WHITELIST, None):
+            config = f"--psm {psm}"
+            if whitelist:
+                config += f" -c tessedit_char_whitelist={whitelist}"
+            raw_text = pytesseract.image_to_string(digit_crop, config=config)
+            match = re.search(r"\d", _correct_ocr_text(raw_text))
+            if match:
+                return int(match.group())
 
     return None

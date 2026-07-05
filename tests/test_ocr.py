@@ -14,7 +14,7 @@ import unittest
 import cv2
 import numpy as np
 
-from vision.ocr import read_clue_numbers
+from vision.ocr import _merge_trailing_zeros, _order_column_digits, read_clue_numbers
 
 _NAVY = (110, 60, 20)  # BGR
 _ORANGE_BG = (140, 200, 245)  # BGR
@@ -65,6 +65,45 @@ class TestOcr(unittest.TestCase):
     def test_empty_crop_returns_empty_list(self):
         empty = np.zeros((0, 0, 3), dtype=np.uint8)
         self.assertEqual(read_clue_numbers(empty, orientation="row"), [])
+
+
+class TestMergeTrailingZeros(unittest.TestCase):
+    """A board-filling run of ten cells renders as adjacent "1" and "0"
+    glyphs (this game's usual no-separator multi-digit style), which a "0"
+    can never legitimately be part of as its own clue."""
+
+    def test_merges_one_zero_into_ten(self):
+        self.assertEqual(_merge_trailing_zeros([1, 0]), [10])
+
+    def test_merges_trailing_zero_in_a_longer_run(self):
+        self.assertEqual(_merge_trailing_zeros([2, 1, 0]), [2, 10])
+
+    def test_lone_zero_is_left_alone(self):
+        # A single "0" clue means the whole line is empty.
+        self.assertEqual(_merge_trailing_zeros([0]), [0])
+
+    def test_no_zeros_is_unchanged(self):
+        self.assertEqual(_merge_trailing_zeros([3, 4, 4]), [3, 4, 4])
+
+
+class TestOrderColumnDigits(unittest.TestCase):
+    """Column digits are normally stacked one per line, but two can render
+    side-by-side on the same line instead (e.g. "10") — reading order must
+    still come out top-to-bottom, then left-to-right within a line."""
+
+    def test_stacked_digits_read_top_to_bottom(self):
+        boxes = [(10, 100, 30, 140), (10, 10, 30, 50), (10, 55, 30, 95)]
+        self.assertEqual(
+            _order_column_digits(boxes),
+            [(10, 10, 30, 50), (10, 55, 30, 95), (10, 100, 30, 140)],
+        )
+
+    def test_side_by_side_digits_read_left_to_right(self):
+        # A left-to-right pair sharing a line ("10"), positioned so that a
+        # naive sort-by-y0 would (wrongly) put the right-hand box first.
+        left = (6, 148, 23, 182)
+        right = (25, 147, 53, 184)
+        self.assertEqual(_order_column_digits([right, left]), [left, right])
 
 
 if __name__ == "__main__":

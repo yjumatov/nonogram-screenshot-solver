@@ -204,11 +204,15 @@ def _find_clue_badges(image: np.ndarray):
         if area < _MIN_BADGE_FILL_RATIO * w * h:
             continue
         cx, cy = centroids[i]
-        # Row badges are wide-and-short and hug the left edge; column badges
-        # are tall-and-narrow and hug the top edge.
-        if x < _ROW_BADGE_MAX_LEFT_OFFSET_FRACTION * width and w > h:
+        # Row badges hug the left edge; column badges hug the top edge. Shape
+        # (row badges usually wide-and-short, column badges tall-and-narrow)
+        # used to be part of this check too, but a badge with a short clue
+        # (e.g. a single digit) can render nearly square or even slightly
+        # wider than tall regardless of which edge it hugs, so position alone
+        # is what actually distinguishes them reliably.
+        if x < _ROW_BADGE_MAX_LEFT_OFFSET_FRACTION * width:
             row_badges.append((cy, x, y, x + w, y + h))
-        elif y < _COL_BADGE_MAX_TOP_OFFSET_FRACTION * height and h > w:
+        elif y < _COL_BADGE_MAX_TOP_OFFSET_FRACTION * height:
             col_badges.append((cx, x, y, x + w, y + h))
 
     row_badges.sort(key=lambda b: b[0])

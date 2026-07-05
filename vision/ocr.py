@@ -1,10 +1,14 @@
 """Read clue numbers out of a cropped clue-badge image, e.g. "344" -> [3, 4, 4].
 
-This game renders row clues as a horizontal run of digits with no separators
-inside a pill to the left of the row (e.g. "344"), and column clues as a
-vertical stack of single digits, one per line, inside a pill above the
-column (e.g. "1215" read top-to-bottom as four separate digits). Either way,
-every clue value is a single digit (0-9).
+This game renders row clues as a horizontal run of digit glyphs with no
+separator inside a pill to the left of the row, and column clues as a
+vertical stack of digit glyphs, one clue value per line, inside a pill above
+the column. Most clue values are a single digit (0-9), but a line with only
+one block can have a value of 10 or more, rendered as an ordinary multi-digit
+number ("11") — visually indistinguishable from several single-digit blocks
+concatenated ("1", "1") since neither case uses a separator. Adjacent digits
+are grouped into one clue value based on spacing (row) or shared line
+(column); see _group_row_digit_boxes and _group_column_lines.
 
 Rather than asking Tesseract to segment and read the whole badge in one
 pass — which proved unreliable here (it would occasionally drop a digit,
@@ -47,6 +51,17 @@ _DIGIT_PSM_MODES = (13, 6)
 _MIN_DIGIT_AREA = 15  # pixels; discards antialiasing specks
 _DIGIT_CROP_PADDING = 6
 _OCR_BORDER_PADDING = 10  # Tesseract reads isolated glyphs more reliably with a quiet margin
+
+# A row badge can hold either several single-digit blocks concatenated with
+# no separator (e.g. "344" -> blocks 3, 4, 4) or, when a line has only one
+# block and it's 10+, a single multi-digit number (e.g. "11" -> one block of
+# 11) — visually ambiguous from digit shapes alone since neither uses a
+# separator. The two cases differ in spacing: digits of one number are
+# kerned tight, separate blocks sit further apart. Calibrated against real
+# screenshots: gaps within one multi-digit number measured <=0.11x digit
+# width; gaps between genuinely separate blocks measured >=0.27x. 0.2 sits
+# with margin in between.
+_SAME_NUMBER_MAX_GAP_RATIO = 0.2
 
 
 def _correct_ocr_text(text: str) -> str:
@@ -94,13 +109,15 @@ def _find_digit_boxes(thresholded: np.ndarray, orientation: str) -> List[Tuple[i
     return _order_column_digits(boxes)
 
 
-def _order_column_digits(boxes: List[Tuple[int, int, int, int]]) -> List[Tuple[int, int, int, int]]:
-    """Column clues are normally one digit per line, top to bottom — but two
-    digits can render side-by-side on the same line if that's more compact
-    (e.g. "10"). Group boxes whose y-ranges substantially overlap into the
-    same line, sort lines top to bottom, and sort left-to-right within a
-    line — a plain sort by y alone would order same-line digits by whichever
-    has the smaller y0, not by reading order.
+def _group_column_lines(boxes: List[Tuple[int, int, int, int]]) -> List[List[Tuple[int, int, int, int]]]:
+    """Group column digit boxes into lines top to bottom, sorted
+    left-to-right within a line. Column clues are normally one digit per
+    line, but two can render side-by-side on the same line if that's more
+    compact (e.g. "11") — those always belong to the same multi-digit clue
+    value, since a column badge never puts two *separate* clue values on
+    one line. Boxes whose y-ranges substantially overlap are treated as the
+    same line; a plain sort by y alone would order same-line digits by
+    whichever has the smaller y0, not by reading order.
     """
     boxes = sorted(boxes, key=lambda box: (box[1], box[0]))  # (y0, x0)
 
@@ -116,9 +133,15 @@ def _order_column_digits(boxes: List[Tuple[int, int, int, int]]) -> List[Tuple[i
                 continue
         lines.append([box])
 
+    return [sorted(line, key=lambda box: box[0]) for line in lines]
+
+
+def _order_column_digits(boxes: List[Tuple[int, int, int, int]]) -> List[Tuple[int, int, int, int]]:
+    """Flatten grouped column lines into overall reading order: top to
+    bottom, left-to-right within a line."""
     ordered = []
-    for line in lines:
-        ordered.extend(sorted(line, key=lambda box: box[0]))
+    for line in _group_column_lines(boxes):
+        ordered.extend(line)
     return ordered
 
 
@@ -163,12 +186,33 @@ def _padded_crop_bounds(
     return cx0, cy0, cx1, cy1
 
 
+def _group_row_digit_boxes(
+    boxes: List[Tuple[int, int, int, int]]
+) -> List[List[Tuple[int, int, int, int]]]:
+    """Group left-to-right row digit boxes into one sublist per clue value:
+    tightly-spaced adjacent digits are the same multi-digit number, a wider
+    gap starts a new (separate) block clue. See _SAME_NUMBER_MAX_GAP_RATIO.
+    """
+    groups: List[List[Tuple[int, int, int, int]]] = []
+    for box in boxes:
+        if groups:
+            prev = groups[-1][-1]
+            gap = box[0] - prev[2]
+            width = min(prev[2] - prev[0], box[2] - box[0])
+            if width > 0 and gap / width <= _SAME_NUMBER_MAX_GAP_RATIO:
+                groups[-1].append(box)
+                continue
+        groups.append([box])
+    return groups
+
+
 def read_clue_numbers(clue_image: np.ndarray, orientation: str = "row") -> List[int]:
     """OCR a single clue badge and return its clue values as a list of ints.
 
     orientation: "row" for a horizontal digit run, or "column" for digits
-    stacked vertically. Determines reading order and which edge of the
-    badge is the rounded cap to discard.
+    stacked vertically. Determines reading order, which edge of the badge is
+    the rounded cap to discard, and how digits are grouped into clue values
+    (see _group_row_digit_boxes / _group_column_lines).
     """
     if clue_image.size == 0:
         return []
@@ -183,45 +227,28 @@ def read_clue_numbers(clue_image: np.ndarray, orientation: str = "row") -> List[
     # Tesseract expects.
     _, thresholded = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
 
-    digits = []
     height, width = thresholded.shape[:2]
     digit_boxes = _find_digit_boxes(thresholded, orientation)
-    for box in digit_boxes:
-        cx0, cy0, cx1, cy1 = _padded_crop_bounds(box, digit_boxes, width, height)
-        digit_crop = thresholded[cy0:cy1, cx0:cx1]
-        digit_crop = cv2.copyMakeBorder(
-            digit_crop,
-            _OCR_BORDER_PADDING, _OCR_BORDER_PADDING, _OCR_BORDER_PADDING, _OCR_BORDER_PADDING,
-            cv2.BORDER_CONSTANT, value=255,
-        )
+    groups = _group_row_digit_boxes(digit_boxes) if orientation == "row" else _group_column_lines(digit_boxes)
 
-        digit = _ocr_single_digit(digit_crop)
-        if digit is not None:
-            digits.append(digit)
+    clue_values = []
+    for group in groups:
+        digit_chars = []
+        for box in group:
+            cx0, cy0, cx1, cy1 = _padded_crop_bounds(box, digit_boxes, width, height)
+            digit_crop = thresholded[cy0:cy1, cx0:cx1]
+            digit_crop = cv2.copyMakeBorder(
+                digit_crop,
+                _OCR_BORDER_PADDING, _OCR_BORDER_PADDING, _OCR_BORDER_PADDING, _OCR_BORDER_PADDING,
+                cv2.BORDER_CONSTANT, value=255,
+            )
+            digit = _ocr_single_digit(digit_crop)
+            if digit is not None:
+                digit_chars.append(str(digit))
+        if digit_chars:
+            clue_values.append(int("".join(digit_chars)))
 
-    return _merge_trailing_zeros(digits)
-
-
-def _merge_trailing_zeros(digits: List[int]) -> List[int]:
-    """Fold a "0" that follows another digit into a two-digit clue (e.g. a
-    board-filling run of ten renders as adjacent "1" and "0" glyphs, same as
-    every other multi-digit clue in this game — no separator).
-
-    A block size of 0 is only ever meaningful as the *sole* clue on a line
-    (meaning the line is empty); every other clue value is >=1. So a "0"
-    glyph that isn't the only one present can't be a standalone clue — it
-    must be completing a two-digit number with the glyph before it. This
-    doesn't generalize to other multi-digit values (e.g. distinguishing "12"
-    the clue from clues "1" and "2" back to back is genuinely ambiguous
-    without more context), but a trailing zero is unambiguous.
-    """
-    merged: List[int] = []
-    for digit in digits:
-        if digit == 0 and merged:
-            merged[-1] = merged[-1] * 10
-        else:
-            merged.append(digit)
-    return merged
+    return clue_values
 
 
 def _ocr_single_digit(digit_crop: np.ndarray) -> Optional[int]:

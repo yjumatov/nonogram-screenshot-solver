@@ -14,21 +14,27 @@ import unittest
 import cv2
 import numpy as np
 
-from vision.ocr import _merge_trailing_zeros, _order_column_digits, read_clue_numbers
+from vision.ocr import _group_row_digit_boxes, _order_column_digits, read_clue_numbers
 
 _NAVY = (110, 60, 20)  # BGR
 _ORANGE_BG = (140, 200, 245)  # BGR
 
 
-def _make_row_badge(digits, cell=77, pill_width=59):
+def _make_row_badge(digits, cell=77, pill_width=59, block_gap=30):
     """A horizontal pill: rounded cap on the left, flat on the right (where
-    it meets the board), matching a row-clue badge."""
-    height, width = cell, pill_width * 2 + 30
+    it meets the board), matching a row-clue badge. Each digit is drawn
+    separately with a visible gap between them, matching the real game's
+    spacing between separate single-digit blocks (a single multi-digit clue
+    value would be drawn with normal tight kerning instead — see
+    read_clue_numbers's digit-grouping logic)."""
+    height, width = cell, pill_width * len(digits) + block_gap * len(digits) + 30
     img = np.full((height, width, 3), _ORANGE_BG, dtype=np.uint8)
     cv2.rectangle(img, (pill_width // 2, 4), (width - 4, height - 4), _NAVY, -1)
     cv2.circle(img, (pill_width // 2, height // 2), pill_width // 2 - 4, _NAVY, -1)
-    text = "".join(str(d) for d in digits)
-    cv2.putText(img, text, (pill_width, height - 15), cv2.FONT_HERSHEY_SIMPLEX, 1.3, (255, 255, 255), 3, cv2.LINE_AA)
+    x = pill_width
+    for digit in digits:
+        cv2.putText(img, str(digit), (x, height - 15), cv2.FONT_HERSHEY_SIMPLEX, 1.3, (255, 255, 255), 3, cv2.LINE_AA)
+        x += block_gap
     return img
 
 
@@ -50,6 +56,17 @@ class TestOcr(unittest.TestCase):
         badge = _make_row_badge([2, 2])
         self.assertEqual(read_clue_numbers(badge, orientation="row"), [2, 2])
 
+    def test_reads_row_clue_with_a_tightly_kerned_multi_digit_number(self):
+        # digits drawn as one cv2.putText string, with real font kerning,
+        # unlike _make_row_badge's separate-block spacing above — matches a
+        # lone block of size 11 rather than blocks 1 and 1.
+        height, width = 77, 150
+        img = np.full((height, width, 3), _ORANGE_BG, dtype=np.uint8)
+        cv2.rectangle(img, (30, 4), (width - 4, height - 4), _NAVY, -1)
+        cv2.circle(img, (30, height // 2), 26, _NAVY, -1)
+        cv2.putText(img, "11", (55, height - 15), cv2.FONT_HERSHEY_SIMPLEX, 1.3, (255, 255, 255), 3, cv2.LINE_AA)
+        self.assertEqual(read_clue_numbers(img, orientation="row"), [11])
+
     def test_reads_column_clue_stacked_digits(self):
         badge = _make_column_badge([1, 2, 4, 5])
         self.assertEqual(read_clue_numbers(badge, orientation="column"), [1, 2, 4, 5])
@@ -67,23 +84,25 @@ class TestOcr(unittest.TestCase):
         self.assertEqual(read_clue_numbers(empty, orientation="row"), [])
 
 
-class TestMergeTrailingZeros(unittest.TestCase):
-    """A board-filling run of ten cells renders as adjacent "1" and "0"
-    glyphs (this game's usual no-separator multi-digit style), which a "0"
-    can never legitimately be part of as its own clue."""
+class TestGroupRowDigitBoxes(unittest.TestCase):
+    """Adjacent row digits are one multi-digit clue value (e.g. a lone block
+    of size 11) when tightly kerned, or separate single-digit blocks (e.g.
+    blocks 1 and 1) when spaced further apart — distinguished by gap-to-width
+    ratio, calibrated against real screenshots."""
 
-    def test_merges_one_zero_into_ten(self):
-        self.assertEqual(_merge_trailing_zeros([1, 0]), [10])
+    def test_tightly_spaced_digits_are_one_group(self):
+        # "11" as a single two-digit number: gap 2px vs digit width 18px.
+        boxes = [(31, 12, 49, 48), (51, 12, 69, 48)]
+        self.assertEqual(_group_row_digit_boxes(boxes), [boxes])
 
-    def test_merges_trailing_zero_in_a_longer_run(self):
-        self.assertEqual(_merge_trailing_zeros([2, 1, 0]), [2, 10])
+    def test_widely_spaced_digits_are_separate_groups(self):
+        # "4 2" as two separate blocks: gap 13px vs digit width 39px.
+        boxes = [(80, 16, 119, 67), (132, 16, 164, 68)]
+        self.assertEqual(_group_row_digit_boxes(boxes), [[boxes[0]], [boxes[1]]])
 
-    def test_lone_zero_is_left_alone(self):
-        # A single "0" clue means the whole line is empty.
-        self.assertEqual(_merge_trailing_zeros([0]), [0])
-
-    def test_no_zeros_is_unchanged(self):
-        self.assertEqual(_merge_trailing_zeros([3, 4, 4]), [3, 4, 4])
+    def test_single_digit_is_its_own_group(self):
+        boxes = [(10, 10, 30, 50)]
+        self.assertEqual(_group_row_digit_boxes(boxes), [boxes])
 
 
 class TestOrderColumnDigits(unittest.TestCase):

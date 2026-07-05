@@ -50,13 +50,25 @@ class GridGeometry:
         return x0, y0, x1, y1
 
 
+# A found quadrilateral only gets warped if it's already nearly
+# axis-aligned (each corner within this fraction of the image's diagonal
+# from where an axis-aligned rectangle's corner would be). Native app
+# screenshots are never genuinely skewed, so a quad that's *far* from
+# axis-aligned is a false-positive contour match (e.g. the grid's own
+# irregular silhouette from its rounded clue badges) rather than real
+# perspective distortion — warping to it does active damage.
+_MAX_CORNER_SKEW_FRACTION = 0.03
+
+
 def load_and_straighten(image_path: str) -> np.ndarray:
     """Load the screenshot and correct any perspective skew.
 
     Finds the largest quadrilateral contour (assumed to be the puzzle
-    card/background) and warps it to a straight, axis-aligned rectangle. If
-    no confident quadrilateral is found, the screenshot is assumed to already
-    be axis-aligned and is returned unchanged.
+    card/background) and warps it to a straight, axis-aligned rectangle —
+    but only if that quadrilateral is already close to axis-aligned (see
+    _MAX_CORNER_SKEW_FRACTION). If no confident, near-rectangular
+    quadrilateral is found, the screenshot is assumed to already be
+    axis-aligned and is returned unchanged.
     """
     image = cv2.imread(image_path)
     if image is None:
@@ -78,6 +90,9 @@ def load_and_straighten(image_path: str) -> np.ndarray:
         return image
 
     corners = _order_corners(approx.reshape(4, 2).astype("float32"))
+    if not _is_nearly_axis_aligned(corners, image.shape):
+        return image
+
     top_left, top_right, bottom_right, bottom_left = corners
 
     width = int(max(np.linalg.norm(bottom_right - bottom_left), np.linalg.norm(top_right - top_left)))
@@ -88,6 +103,22 @@ def load_and_straighten(image_path: str) -> np.ndarray:
 
     matrix = cv2.getPerspectiveTransform(corners, destination)
     return cv2.warpPerspective(image, matrix, (width, height))
+
+
+def _is_nearly_axis_aligned(corners: np.ndarray, image_shape) -> bool:
+    """Whether an ordered (TL, TR, BR, BL) quad is close enough to its own
+    axis-aligned bounding box to be a real (near-zero) perspective
+    correction rather than a false-positive contour match."""
+    x_coords, y_coords = corners[:, 0], corners[:, 1]
+    bounding_box_corners = np.array([
+        [x_coords.min(), y_coords.min()],
+        [x_coords.max(), y_coords.min()],
+        [x_coords.max(), y_coords.max()],
+        [x_coords.min(), y_coords.max()],
+    ])
+    diagonal = np.hypot(image_shape[0], image_shape[1])
+    max_offset = np.linalg.norm(corners - bounding_box_corners, axis=1).max()
+    return max_offset <= _MAX_CORNER_SKEW_FRACTION * diagonal
 
 
 def _order_corners(points: np.ndarray) -> np.ndarray:
@@ -102,10 +133,16 @@ def _order_corners(points: np.ndarray) -> np.ndarray:
 
 
 # Clue badges are a dark navy blue: darker than the white/colored cells and
-# the orange page background, but distinctly lighter than the grid's flat
-# black lines (which is what keeps the two from bleeding into one blob).
+# the page background, but distinctly lighter than the grid's lines in most
+# theme variants. That brightness gap isn't reliable on its own though — some
+# theme variants render grid lines as a dark *gray* (not pure black) whose
+# brightness overlaps the badge's, and gray isn't distinguishable from navy
+# by value alone. Requiring some actual color (R/G/B channels spread apart,
+# not equal) is what keeps navy badges separate from any dark neutral-gray
+# grid line, regardless of that line's exact brightness.
 _NAVY_MIN_VALUE = 25
 _NAVY_MAX_VALUE = 150
+_NAVY_MIN_SATURATION = 15
 
 # A badge must be at least this big (relative to image area) to count as a
 # real clue badge rather than compression/anti-aliasing noise.
@@ -113,14 +150,36 @@ _MIN_BADGE_AREA_FRACTION = 0.001
 
 # Badges are identified by which edge of the image they hug: row badges sit
 # flush against the left edge, column badges flush against the top edge.
-_ROW_BADGE_MAX_LEFT_OFFSET_FRACTION = 0.02
-_COL_BADGE_MAX_TOP_OFFSET_FRACTION = 0.05
+# The offset margins are deliberately generous (not a hairline cutoff): a
+# real badge's detected bounding box can shift by a few pixels depending on
+# exact rendering/masking, and a too-tight cutoff has been observed to miss
+# a real badge sitting just barely past it.
+_ROW_BADGE_MAX_LEFT_OFFSET_FRACTION = 0.03
+_COL_BADGE_MAX_TOP_OFFSET_FRACTION = 0.08
+
+# A badge is a solid pill shape, so its pixel count should fill most of its
+# own bounding box. This rejects a different artifact than the area/position
+# filters: an anti-aliased ring where the board's outer border blends into a
+# colored (non-white) page background can incidentally match the navy color
+# range all the way around the board, but as a thin outline it fills only a
+# small fraction of its (board-sized) bounding box.
+_MIN_BADGE_FILL_RATIO = 0.5
 
 
 def _navy_mask(image: np.ndarray) -> np.ndarray:
     """Binary mask of pixels in the clue badges' navy color range."""
+    blue, green, red = image[:, :, 0].astype(np.int16), image[:, :, 1].astype(np.int16), image[:, :, 2].astype(np.int16)
     channel_max = image.max(axis=2)
-    mask = ((channel_max > _NAVY_MIN_VALUE) & (channel_max < _NAVY_MAX_VALUE)).astype(np.uint8) * 255
+    channel_min = image.min(axis=2)
+    is_in_value_range = (channel_max > _NAVY_MIN_VALUE) & (channel_max < _NAVY_MAX_VALUE)
+    is_colored = (channel_max - channel_min) >= _NAVY_MIN_SATURATION
+    # "Navy" is fundamentally a shade of blue, so blue must be the strongest
+    # channel. Without this, an anti-aliased pixel where the board's outer
+    # border blends into a colored (e.g. green) page background can land in
+    # the same dark-and-colored bucket as a real badge, forming a thin ring
+    # around the whole board that bridges unrelated badges into one blob.
+    is_blue_dominant = (blue >= green) & (blue >= red)
+    mask = (is_in_value_range & is_colored & is_blue_dominant).astype(np.uint8) * 255
     # An opening (erode then dilate) clears out thin noise and breaks any
     # accidental single-pixel bridges between a badge and something else.
     kernel = np.ones((3, 3), np.uint8)
@@ -141,6 +200,8 @@ def _find_clue_badges(image: np.ndarray):
     for i in range(1, num_labels):
         x, y, w, h, area = stats[i]
         if area < min_area:
+            continue
+        if area < _MIN_BADGE_FILL_RATIO * w * h:
             continue
         cx, cy = centroids[i]
         # Row badges are wide-and-short and hug the left edge; column badges

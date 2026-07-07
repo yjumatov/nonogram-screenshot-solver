@@ -14,7 +14,7 @@ import unittest
 import cv2
 import numpy as np
 
-from vision.ocr import _group_row_digit_boxes, _order_column_digits, read_clue_numbers
+from vision.ocr import _clue_text_threshold, _group_row_digit_boxes, _order_column_digits, read_clue_numbers
 
 _NAVY = (110, 60, 20)  # BGR
 _ORANGE_BG = (140, 200, 245)  # BGR
@@ -123,6 +123,41 @@ class TestOrderColumnDigits(unittest.TestCase):
         left = (6, 148, 23, 182)
         right = (25, 147, 53, 184)
         self.assertEqual(_order_column_digits([right, left]), [left, right])
+
+
+class TestClueTextThreshold(unittest.TestCase):
+    """This game dims a clue digit's text once its block is already
+    satisfied on the board, so a badge can have two distinct text
+    brightness levels instead of one — a real screenshot exposed a bug
+    where plain Otsu thresholding lumped the dimmed digit's cluster in with
+    the background and dropped it entirely."""
+
+    def test_includes_a_dimmed_digit_cluster(self):
+        image = np.full((100, 100), 60, dtype=np.uint8)  # navy background
+        image[10:20, 10:50] = 130  # dimmed ("already satisfied") digit
+        image[60:90, 10:90] = 250  # full-brightness digit
+        threshold = _clue_text_threshold(image)
+        self.assertGreater(threshold, 60)
+        self.assertLessEqual(threshold, 130)
+
+    def test_ignores_curved_glyph_antialiasing_noise(self):
+        # A curved glyph (e.g. "0") sheds a modest amount of scattered
+        # mid-brightness edge noise that must not be mistaken for a real
+        # second text tier.
+        rng = np.random.default_rng(0)
+        image = np.full((100, 100), 60, dtype=np.uint8)
+        noise_coords = rng.integers(10, 90, size=(40, 2))
+        for x, y in noise_coords:
+            image[y, x] = 100
+        image[60:90, 10:90] = 250
+        otsu_expected, _ = cv2.threshold(image, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+        self.assertEqual(_clue_text_threshold(image), int(otsu_expected))
+
+    def test_single_text_tier_matches_plain_otsu(self):
+        image = np.full((100, 100), 60, dtype=np.uint8)
+        image[10:90, 10:90] = 250
+        otsu_expected, _ = cv2.threshold(image, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+        self.assertEqual(_clue_text_threshold(image), int(otsu_expected))
 
 
 if __name__ == "__main__":

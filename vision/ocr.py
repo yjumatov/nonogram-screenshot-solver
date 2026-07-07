@@ -63,6 +63,19 @@ _OCR_BORDER_PADDING = 10  # Tesseract reads isolated glyphs more reliably with a
 # with margin in between.
 _SAME_NUMBER_MAX_GAP_RATIO = 0.2
 
+# Used when checking for a dimmed-text cluster (see _clue_text_threshold):
+# how far above the background's own gray level to start looking, so its
+# own anti-aliasing tail isn't mistaken for a second cluster.
+_BACKGROUND_TAIL_MARGIN = 20
+# How many pixels a candidate cluster needs at its single brightest gray
+# level to count as a genuine dimmed digit rather than anti-aliasing noise
+# around a curved glyph's edge (e.g. "0", "8", "9" all shed a fair number of
+# stray mid-brightness pixels along their curve, which can otherwise look
+# like a small second cluster). Calibrated against real screenshots: a
+# curved glyph's anti-aliasing noise peaked at ~114 pixels; a genuine dimmed
+# digit peaked at ~437.
+_MIN_DIM_CLUSTER_PEAK = 150
+
 
 def _correct_ocr_text(text: str) -> str:
     """Map commonly-confused OCR glyphs back to the digits they represent."""
@@ -206,6 +219,52 @@ def _group_row_digit_boxes(
     return groups
 
 
+def _clue_text_threshold(gray: np.ndarray) -> int:
+    """Pick the black/white cutoff separating a badge's solid background
+    from its text.
+
+    This game dims a clue value's text (a distinct, noticeably darker gray
+    rather than pure white) once that block is already satisfied on the
+    board — so a badge can have two different "text" brightness levels at
+    once, not one. Plain Otsu assumes only two clusters (text vs
+    background) and, with three actually present, has been observed to
+    lump the dimmed digit in with the background, dropping it entirely.
+
+    This starts from Otsu's own threshold, then checks the gap between the
+    background's level and that threshold for a genuine second cluster —
+    distinguished from ordinary anti-aliasing noise (which curved glyphs
+    like "0"/"8"/"9" shed a fair amount of) by requiring a real peak, not
+    just scattered low counts (_MIN_DIM_CLUSTER_PEAK). If one is found, the
+    cutoff moves to the valley between the background and it, so both text
+    tiers are captured; otherwise Otsu's own threshold is used unchanged,
+    since lowering it needlessly has been observed to measurably hurt
+    Tesseract's accuracy even on already-clean glyphs.
+    """
+    histogram = cv2.calcHist([gray], [0], None, [256], [0, 256]).flatten()
+    background_level = int(np.argmax(histogram))
+    otsu_threshold, _ = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+    otsu_threshold = int(otsu_threshold)
+
+    search_start = background_level + _BACKGROUND_TAIL_MARGIN
+    if otsu_threshold <= search_start:
+        return otsu_threshold
+
+    # Inclusive of otsu_threshold itself: Otsu's own cutoff groups gray
+    # values <= it with the background, so a cleanly-separated dim cluster
+    # sitting exactly at that boundary value would otherwise be excluded
+    # from this search by one.
+    window = histogram[search_start : otsu_threshold + 1]
+    if window.max() < _MIN_DIM_CLUSTER_PEAK:
+        return otsu_threshold
+
+    dim_cluster_peak = search_start + int(np.argmax(window))
+    if dim_cluster_peak <= search_start:
+        return otsu_threshold
+
+    valley = histogram[search_start:dim_cluster_peak]
+    return search_start + int(np.argmin(valley))
+
+
 def read_clue_numbers(clue_image: np.ndarray, orientation: str = "row") -> List[int]:
     """OCR a single clue badge and return its clue values as a list of ints.
 
@@ -221,11 +280,11 @@ def read_clue_numbers(clue_image: np.ndarray, orientation: str = "row") -> List[
     if gray.size == 0:
         return []
 
-    # White text on a dark badge: THRESH_BINARY_INV maps the (bright) text
-    # above the OTSU-picked threshold to black and the (dark) badge
-    # background below it to white, producing the black-on-white image
-    # Tesseract expects.
-    _, thresholded = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+    # White text on a dark badge: THRESH_BINARY_INV maps text brighter than
+    # the threshold to black and the (dark) badge background below it to
+    # white, producing the black-on-white image Tesseract expects.
+    threshold_value = _clue_text_threshold(gray)
+    _, thresholded = cv2.threshold(gray, threshold_value, 255, cv2.THRESH_BINARY_INV)
 
     height, width = thresholded.shape[:2]
     digit_boxes = _find_digit_boxes(thresholded, orientation)
@@ -252,15 +311,30 @@ def read_clue_numbers(clue_image: np.ndarray, orientation: str = "row") -> List[
 
 
 def _ocr_single_digit(digit_crop: np.ndarray) -> Optional[int]:
-    """OCR one isolated digit glyph, or return None if no attempt reads a digit."""
+    """OCR one isolated digit glyph, or return None if no attempt reads a digit.
+
+    Tries every psm/whitelist combination and prefers any single-character
+    result over a multi-character one. A cleanly segmented isolated glyph
+    should always read as exactly one character; a psm mode occasionally
+    hallucinates a bogus extra stroke off this font's flagged "1" glyph as
+    its own leading digit (e.g. reading "41" for a lone "1"), and picking
+    "the first digit found" in that string grabs the spurious one. A
+    multi-character result is itself a sign of that split, so it's only
+    used as a last resort if no attempt yields a clean single digit.
+    """
+    fallback = None
     for psm in _DIGIT_PSM_MODES:
         for whitelist in (_CHAR_WHITELIST, None):
             config = f"--psm {psm}"
             if whitelist:
                 config += f" -c tessedit_char_whitelist={whitelist}"
             raw_text = pytesseract.image_to_string(digit_crop, config=config)
-            match = re.search(r"\d", _correct_ocr_text(raw_text))
-            if match:
-                return int(match.group())
+            corrected = _correct_ocr_text(raw_text).strip()
+            if len(corrected) == 1 and corrected.isdigit():
+                return int(corrected)
+            if fallback is None:
+                match = re.search(r"\d", corrected)
+                if match:
+                    fallback = int(match.group())
 
-    return None
+    return fallback

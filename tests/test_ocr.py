@@ -14,7 +14,14 @@ import unittest
 import cv2
 import numpy as np
 
-from vision.ocr import _clue_text_threshold, _group_row_digit_boxes, _order_column_digits, read_clue_numbers
+from vision.ocr import (
+    _clue_text_threshold,
+    _drop_undersized_fragments,
+    _group_row_digit_boxes,
+    _looks_like_five_not_seven,
+    _order_column_digits,
+    read_clue_numbers,
+)
 
 _NAVY = (110, 60, 20)  # BGR
 _ORANGE_BG = (140, 200, 245)  # BGR
@@ -158,6 +165,54 @@ class TestClueTextThreshold(unittest.TestCase):
         image[10:90, 10:90] = 250
         otsu_expected, _ = cv2.threshold(image, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
         self.assertEqual(_clue_text_threshold(image), int(otsu_expected))
+
+
+class TestLooksLikeFiveNotSeven(unittest.TestCase):
+    """A real screenshot exposed this font's "5" being confidently misread
+    as "7" by Tesseract with no other psm mode to fall back on. Tested here
+    with hand-built shapes rather than cv2.putText, since (verified
+    separately) cv2's Hershey font doesn't reproduce this font's
+    bottom-left-heavy "5" — it's the geometric rule being tested, not any
+    particular font's rendering of it."""
+
+    def test_bottom_left_heavy_shape_reads_as_five(self):
+        # Ink concentrated in the bottom-left, like a "5"'s bottom curve
+        # wrapping back to the left.
+        crop = np.full((40, 20), 255, dtype=np.uint8)
+        crop[20:, :10] = 0
+        self.assertTrue(_looks_like_five_not_seven(crop))
+
+    def test_bottom_left_empty_shape_reads_as_seven(self):
+        # Ink confined to the right side, like a "7"'s diagonal stroke
+        # leaving the bottom-left corner empty.
+        crop = np.full((40, 20), 255, dtype=np.uint8)
+        crop[:, 15:] = 0
+        self.assertFalse(_looks_like_five_not_seven(crop))
+
+    def test_empty_crop_is_not_a_five(self):
+        self.assertFalse(_looks_like_five_not_seven(np.zeros((0, 0), dtype=np.uint8)))
+
+
+class TestDropUndersizedFragments(unittest.TestCase):
+    """A real screenshot had a cap-corner artifact (page background peeking
+    through the pill's rounded corner) that touched the badge's top edge
+    without touching its left edge — the specific combination the
+    edge-touching filters check for — and got read as a bogus extra digit.
+    Comparing height against the badge's real digits catches it regardless
+    of which edge or corner it happens to touch."""
+
+    def test_drops_a_component_much_shorter_than_its_siblings(self):
+        fragment = (3, 0, 16, 11)  # height 11
+        digits = [(22, 10, 38, 43), (53, 10, 69, 43), (84, 10, 100, 43)]  # height 33
+        self.assertEqual(_drop_undersized_fragments([fragment] + digits), digits)
+
+    def test_keeps_all_boxes_when_heights_are_consistent(self):
+        digits = [(22, 10, 38, 43), (53, 10, 69, 43), (84, 10, 100, 43)]
+        self.assertEqual(_drop_undersized_fragments(digits), digits)
+
+    def test_single_box_is_never_dropped(self):
+        lone = [(3, 0, 16, 11)]
+        self.assertEqual(_drop_undersized_fragments(lone), lone)
 
 
 if __name__ == "__main__":

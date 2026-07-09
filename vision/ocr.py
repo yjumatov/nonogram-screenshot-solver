@@ -41,12 +41,15 @@ _OCR_CORRECTIONS = {
 
 _CHAR_WHITELIST = "0123456789IlSOoBi|"
 # No single Tesseract page-segmentation mode reads every digit glyph in this
-# font reliably — psm 13 ("raw line") is needed for some glyphs (a flagged
-# "1", a "5" that psm 10 drops entirely) but blank on others (a "0" that only
-# psm 6 reads). Rather than chase one "correct" mode, try a short list, each
-# with and without the digit whitelist, and take the first one that yields a
-# digit — cheap, since each attempt is a single isolated glyph.
-_DIGIT_PSM_MODES = (13, 6)
+# font reliably. psm 6 is tried first since it's the more generally
+# accurate of the two — psm 13 ("raw line") has been observed to
+# confidently misread an otherwise-unambiguous "5" as "7", a wrong answer
+# that "prefer any single-character result" (see _ocr_single_digit) can't
+# catch on its own. psm 13 stays as a fallback since some glyphs need it (a
+# flagged "1", a "0" that psm 6 alone leaves blank). Each mode is tried with
+# and without the digit whitelist — cheap, since each attempt is a single
+# isolated glyph.
+_DIGIT_PSM_MODES = (6, 13)
 
 _MIN_DIGIT_AREA = 15  # pixels; discards antialiasing specks
 _DIGIT_CROP_PADDING = 6
@@ -75,6 +78,9 @@ _BACKGROUND_TAIL_MARGIN = 20
 # curved glyph's anti-aliasing noise peaked at ~114 pixels; a genuine dimmed
 # digit peaked at ~437.
 _MIN_DIM_CLUSTER_PEAK = 150
+
+# See _looks_like_five_not_seven.
+_FIVE_VS_SEVEN_BOTTOM_LEFT_INK_RATIO = 0.5
 
 
 def _correct_ocr_text(text: str) -> str:
@@ -116,10 +122,39 @@ def _find_digit_boxes(thresholded: np.ndarray, orientation: str) -> List[Tuple[i
             continue
         boxes.append((x, y, x + w, y + h))
 
+    boxes = _drop_undersized_fragments(boxes)
+
     if orientation == "row":
         boxes.sort(key=lambda box: box[0])
         return boxes
     return _order_column_digits(boxes)
+
+
+# Relative to the median digit height in a badge (see _drop_undersized_fragments).
+_MIN_DIGIT_HEIGHT_RATIO = 0.5
+
+
+def _drop_undersized_fragments(
+    boxes: List[Tuple[int, int, int, int]]
+) -> List[Tuple[int, int, int, int]]:
+    """Discard a component much shorter than its badge-mates.
+
+    Every digit glyph in this font renders at the same height within one
+    badge, so a component well short of that height is a stray artifact,
+    not a genuine glyph. This catches cases the edge-touching filters above
+    miss: a real screenshot had a cap-corner sliver (background peeking
+    through the pill's rounded corner) that touched the badge's top edge
+    without touching its left edge — the specific combination those filters
+    check for — and got read as a bogus extra "1", inflating that row's
+    clue by one. Comparing against the *other digits actually found in this
+    badge* catches any such fragment regardless of which edge or corner it
+    happens to touch.
+    """
+    if len(boxes) < 2:
+        return boxes
+    heights = sorted(y1 - y0 for _, y0, _, y1 in boxes)
+    median_height = heights[len(heights) // 2]
+    return [box for box in boxes if (box[3] - box[1]) >= _MIN_DIGIT_HEIGHT_RATIO * median_height]
 
 
 def _group_column_lines(boxes: List[Tuple[int, int, int, int]]) -> List[List[Tuple[int, int, int, int]]]:
@@ -265,6 +300,28 @@ def _clue_text_threshold(gray: np.ndarray) -> int:
     return search_start + int(np.argmin(valley))
 
 
+def _looks_like_five_not_seven(tight_digit_crop: np.ndarray) -> bool:
+    """Whether a digit Tesseract read as "7" is actually a "5".
+
+    This font's "5" has been observed to be confidently misread as "7" by
+    psm 13 with no other mode corroborating either reading to fall back on
+    (unlike other 5-vs-7 mix-ups psm-mode-ordering alone resolves). The two
+    shapes are reliably distinguishable by how much ink sits in the
+    bottom-left quadrant: a "5"'s bottom curve wraps back to the left,
+    while a "7"'s diagonal stroke leaves that corner almost empty.
+    Calibrated across every "5" and "7" in the real screenshot corpus
+    (resized to a fixed size first, to remove any bias from crops of
+    different pixel scale): genuine "7"s measured a ratio of 0.36-0.468,
+    genuine "5"s measured 0.46-0.59 — comfortably separated by 0.5.
+    """
+    if tight_digit_crop.size == 0:
+        return False
+    resized = cv2.resize(tight_digit_crop, (40, 40), interpolation=cv2.INTER_NEAREST)
+    bottom_left = resized[20:, :20]
+    ink_ratio = (bottom_left == 0).sum() / bottom_left.size
+    return ink_ratio > _FIVE_VS_SEVEN_BOTTOM_LEFT_INK_RATIO
+
+
 def read_clue_numbers(clue_image: np.ndarray, orientation: str = "row") -> List[int]:
     """OCR a single clue badge and return its clue values as a list of ints.
 
@@ -302,6 +359,8 @@ def read_clue_numbers(clue_image: np.ndarray, orientation: str = "row") -> List[
                 cv2.BORDER_CONSTANT, value=255,
             )
             digit = _ocr_single_digit(digit_crop)
+            if digit == 7 and _looks_like_five_not_seven(thresholded[box[1] : box[3], box[0] : box[2]]):
+                digit = 5
             if digit is not None:
                 digit_chars.append(str(digit))
         if digit_chars:
